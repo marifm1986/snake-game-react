@@ -1,0 +1,1 @@
+"# snake-game-react"  initgit add README.mdgit commit -m "first commit"git branch -M maingit remote add origin https://github.com/marifm1986/snake-game-react.gitgit push -u origin main
