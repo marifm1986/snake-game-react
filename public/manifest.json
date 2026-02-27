@@ -1,0 +1,24 @@
+{
+  "name": "Snake Arcade Classic",
+  "short_name": "Snake",
+  "description": "Classic Snake arcade game - eat, grow, survive!",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fdf2e9",
+  "theme_color": "#f4a261",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

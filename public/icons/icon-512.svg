@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#f4a261"/>
+  <rect x="56" y="56" width="400" height="400" rx="40" fill="#1f1308"/>
+  <!-- snake body -->
+  <rect x="100" y="220" width="50" height="50" rx="6" fill="#70e000"/>
+  <rect x="155" y="220" width="50" height="50" rx="6" fill="#70e000"/>
+  <rect x="210" y="220" width="50" height="50" rx="6" fill="#70e000"/>
+  <rect x="265" y="220" width="50" height="50" rx="6" fill="#70e000"/>
+  <rect x="265" y="165" width="50" height="50" rx="6" fill="#70e000"/>
+  <rect x="320" y="165" width="50" height="50" rx="6" fill="#9ef01a"/>
+  <!-- food -->
+  <rect x="155" y="330" width="50" height="50" rx="6" fill="#ff4d6d"/>
+</svg>
