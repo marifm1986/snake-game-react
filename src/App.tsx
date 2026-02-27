@@ -102,8 +102,11 @@ export function App() {
     if (newLevel !== level) {
       setLevel(newLevel);
       setLevelUpFlash(true);
-      const timeout = setTimeout(() => setLevelUpFlash(false), 1200);
-      return () => clearTimeout(timeout);
+      // const timeout = setTimeout(() => setLevelUpFlash(false), 3000);
+      
+      setTimeout(() => {
+        setLevelUpFlash(false);
+      }, 3000);
     }
   }, [score, level]);
 
@@ -381,14 +384,14 @@ export function App() {
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.15)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.15)_1px,transparent_1px)] bg-[size:38px_38px] opacity-30" />
 
       {/* Level up flash overlay */}
-      {levelUpFlash && (
+      {/* {levelUpFlash && (
         <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center">
           <div className="animate-bounce rounded-2xl bg-amber-500/90 px-8 py-4 text-center shadow-2xl">
             <p className="text-2xl font-black uppercase text-white sm:text-4xl">Level {level}!</p>
             <p className="text-sm font-semibold text-amber-100">Speed increased</p>
           </div>
         </div>
-      )}
+      )} */}
 
       <section className="relative mx-auto flex w-full max-w-5xl flex-1 flex-col gap-3 rounded-2xl border border-amber-100/70 bg-[#fff7ec]/85 p-3 shadow-[0_18px_60px_rgba(134,71,26,0.2)] backdrop-blur sm:gap-6 sm:rounded-3xl sm:p-5 md:p-8">
         {/* Header */}
