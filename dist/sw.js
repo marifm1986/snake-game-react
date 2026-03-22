@@ -1,4 +1,4 @@
-const CACHE_NAME = "snake-v1774190258491";
+const CACHE_NAME = "snake-v1774190989537";
 const PRECACHE = ["/", "/index.html"];
 
 self.addEventListener("install", (event) => {
