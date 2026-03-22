@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ref, get, set, query, orderByChild, limitToLast } from "firebase/database";
+import { collection, doc, getDoc, setDoc, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db, dbEnabled } from "./firebase";
 import { useServiceWorker } from "./useServiceWorker";
 
 type Point = { x: number; y: number };
 type Direction = "up" | "down" | "left" | "right";
+type GameDifficulty = "easy" | "hard";
 
 type LeaderboardEntry = {
   id: string;
@@ -14,13 +15,112 @@ type LeaderboardEntry = {
   updatedAt: string;
 };
 
+// ─── Snake Skins ───
+type SnakeSkin = {
+  id: string;
+  name: string;
+  cost: number;
+  headGradient: string;
+  bodyColor: (t: number, idx: number) => string;
+  tailColor: (t: number) => string;
+  glowColor: string;
+  eyeBg: string;
+};
+
+const SNAKE_SKINS: SnakeSkin[] = [
+  {
+    id: "classic",
+    name: "Classic Green",
+    cost: 0,
+    headGradient: "linear-gradient(135deg, #9ef01a 0%, #70e000 100%)",
+    bodyColor: (t, idx) => `rgb(${Math.round(80 + t * 30)}, ${Math.round(224 - t * 60) + (idx % 2 === 0 ? 8 : 0)}, 0)`,
+    tailColor: (t) => `rgb(${Math.round(60 + t * 40)}, ${Math.round(224 - t * 80)}, 0)`,
+    glowColor: "rgba(158,240,26,0.6)",
+    eyeBg: "#1a1a2e",
+  },
+  {
+    id: "neon_blue",
+    name: "Neon Blue",
+    cost: 15,
+    headGradient: "linear-gradient(135deg, #00f5ff 0%, #0077ff 100%)",
+    bodyColor: (t, idx) => `rgb(${Math.round(0 + t * 20)}, ${Math.round(180 - t * 60) + (idx % 2 === 0 ? 10 : 0)}, ${Math.round(255 - t * 40)})`,
+    tailColor: (t) => `rgb(${Math.round(0 + t * 30)}, ${Math.round(120 - t * 50)}, ${Math.round(200 - t * 40)})`,
+    glowColor: "rgba(0,245,255,0.6)",
+    eyeBg: "#0a0a2e",
+  },
+  {
+    id: "fire",
+    name: "Fire",
+    cost: 30,
+    headGradient: "linear-gradient(135deg, #ffdd00 0%, #ff6600 100%)",
+    bodyColor: (t, idx) => `rgb(${Math.round(255 - t * 60)}, ${Math.round(120 - t * 80) + (idx % 2 === 0 ? 15 : 0)}, ${Math.round(0 + t * 10)})`,
+    tailColor: (t) => `rgb(${Math.round(200 - t * 60)}, ${Math.round(50 - t * 30)}, 0)`,
+    glowColor: "rgba(255,102,0,0.6)",
+    eyeBg: "#1a0a00",
+  },
+  {
+    id: "galaxy",
+    name: "Galaxy",
+    cost: 50,
+    headGradient: "linear-gradient(135deg, #e040fb 0%, #7c4dff 100%)",
+    bodyColor: (t, idx) => `rgb(${Math.round(160 - t * 60) + (idx % 2 === 0 ? 10 : 0)}, ${Math.round(40 + t * 20)}, ${Math.round(220 - t * 40)})`,
+    tailColor: (t) => `rgb(${Math.round(100 - t * 30)}, ${Math.round(30 + t * 10)}, ${Math.round(180 - t * 50)})`,
+    glowColor: "rgba(224,64,251,0.6)",
+    eyeBg: "#1a0a2e",
+  },
+  {
+    id: "gold",
+    name: "Gold",
+    cost: 75,
+    headGradient: "linear-gradient(135deg, #ffd700 0%, #daa520 100%)",
+    bodyColor: (t, idx) => `rgb(${Math.round(218 - t * 40) + (idx % 2 === 0 ? 8 : 0)}, ${Math.round(165 - t * 40)}, ${Math.round(32 + t * 10)})`,
+    tailColor: (t) => `rgb(${Math.round(180 - t * 40)}, ${Math.round(130 - t * 40)}, ${Math.round(20 + t * 10)})`,
+    glowColor: "rgba(255,215,0,0.6)",
+    eyeBg: "#2e2a1a",
+  },
+];
+
 const GRID_SIZE = 20;
 const MAX_LEVEL = 20;
 const APPLES_PER_LEVEL = 5;
 const LOCAL_LEADERBOARD_KEY = "snake-local-leaderboard";
+const COIN_BALANCE_KEY = "snake-coin-balance";
+const PURCHASED_SKINS_KEY = "snake-purchased-skins";
+const ACTIVE_SKIN_KEY = "snake-active-skin";
 
-function speedForLevel(level: number) {
+function speedForLevel(level: number, difficulty: GameDifficulty) {
+  if (difficulty === "hard") {
+    return Math.max(50, Math.round(180 - level * 12));
+  }
   return Math.round(200 - level * 7);
+}
+
+// ─── Hard mode obstacle generation ───
+function generateObstacles(level: number, excluded: Set<string>): Point[] {
+  if (level <= 0) return [];
+  const obstacles: Point[] = [];
+  const count = Math.min(level * 2 + 1, 30);
+  const center = Math.floor(GRID_SIZE / 2);
+  const attempts = count * 20;
+  let tries = 0;
+
+  while (obstacles.length < count && tries < attempts) {
+    tries++;
+    // Place obstacles in the middle area (avoiding edges where snake starts)
+    const x = Math.floor(Math.random() * (GRID_SIZE - 4)) + 2;
+    const y = Math.floor(Math.random() * (GRID_SIZE - 4)) + 2;
+    const key = `${x}:${y}`;
+
+    // Don't place too close to start position or on excluded cells
+    if (excluded.has(key)) continue;
+    if (Math.abs(x - 10) <= 2 && Math.abs(y - 10) <= 1) continue;
+    // Avoid blocking the very center completely at low levels
+    if (level < 3 && Math.abs(x - center) <= 1 && Math.abs(y - center) <= 1) continue;
+    if (obstacles.some((o) => o.x === x && o.y === y)) continue;
+
+    obstacles.push({ x, y });
+  }
+  return obstacles;
 }
 
 const DIRECTION_VECTORS: Record<Direction, Point> = {
@@ -73,12 +173,7 @@ function levelTitle(lvl: number) {
   return "ROOKIE";
 }
 
-// Compute snake segment shape: which neighbors are also snake?
-function getSegmentRadius(
-  snake: Point[],
-  idx: number,
-  cellPct: number
-) {
+function getSegmentRadius(snake: Point[], idx: number, cellPct: number) {
   const seg = snake[idx];
   const prev = idx > 0 ? snake[idx - 1] : null;
   const next = idx < snake.length - 1 ? snake[idx + 1] : null;
@@ -90,7 +185,6 @@ function getSegmentRadius(
   const hasLeft = (prev && prev.y === seg.y && prev.x === seg.x - 1) || (next && next.y === seg.y && next.x === seg.x - 1);
   const hasRight = (prev && prev.y === seg.y && prev.x === seg.x + 1) || (next && next.y === seg.y && next.x === seg.x + 1);
 
-  // top-left, top-right, bottom-right, bottom-left
   const tl = (hasUp || hasLeft) ? zero : r;
   const tr = (hasUp || hasRight) ? zero : r;
   const br = (hasDown || hasRight) ? zero : r;
@@ -99,8 +193,34 @@ function getSegmentRadius(
   return `${tl} ${tr} ${br} ${bl}`;
 }
 
-type GameScreen = "name" | "playing";
-type MobileTab = "play" | "ranks";
+// ─── localStorage helpers for shop ───
+function loadCoinBalance(): number {
+  const raw = window.localStorage.getItem(COIN_BALANCE_KEY);
+  return raw ? (Number(raw) || 0) : 0;
+}
+function saveCoinBalance(val: number) {
+  window.localStorage.setItem(COIN_BALANCE_KEY, String(val));
+}
+function loadPurchasedSkins(): string[] {
+  const raw = window.localStorage.getItem(PURCHASED_SKINS_KEY);
+  if (!raw) return ["classic"];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : ["classic"];
+  } catch { return ["classic"]; }
+}
+function savePurchasedSkins(skins: string[]) {
+  window.localStorage.setItem(PURCHASED_SKINS_KEY, JSON.stringify(skins));
+}
+function loadActiveSkin(): string {
+  return window.localStorage.getItem(ACTIVE_SKIN_KEY) || "classic";
+}
+function saveActiveSkin(id: string) {
+  window.localStorage.setItem(ACTIVE_SKIN_KEY, id);
+}
+
+type GameScreen = "name" | "playing" | "shop";
+type MobileTab = "play" | "ranks" | "shop";
 
 export function App() {
   const { updateAvailable, applyUpdate } = useServiceWorker();
@@ -112,8 +232,19 @@ export function App() {
   });
   const nameInputRef = useRef<HTMLInputElement>(null);
 
+  // ─── Difficulty ───
+  const [difficulty, setDifficulty] = useState<GameDifficulty>("easy");
+
+  // ─── Snake Skin Shop ───
+  const [coinBalance, setCoinBalance] = useState(loadCoinBalance);
+  const [purchasedSkins, setPurchasedSkins] = useState(loadPurchasedSkins);
+  const [activeSkinId, setActiveSkinId] = useState(loadActiveSkin);
+  const activeSkin = SNAKE_SKINS.find((s) => s.id === activeSkinId) || SNAKE_SKINS[0];
+
+  // ─── Game state ───
   const [snake, setSnake] = useState<Point[]>(START_SNAKE);
   const [food, setFood] = useState<Point>(() => randomFood(new Set(START_SNAKE.map(toKey))));
+  const [obstacles, setObstacles] = useState<Point[]>([]);
   const [direction, setDirection] = useState<Direction>("right");
   const [isRunning, setIsRunning] = useState(false);
   const [gameOver, setGameOver] = useState(false);
@@ -131,7 +262,10 @@ export function App() {
   const boardRef = useRef<HTMLDivElement>(null);
   const [boosting, setBoosting] = useState(false);
   const boostingRef = useRef(false);
-  const baseSpeed = speedForLevel(level);
+  const difficultyRef = useRef<GameDifficulty>(difficulty);
+  difficultyRef.current = difficulty;
+
+  const baseSpeed = speedForLevel(level, difficulty);
   const speed = boosting ? Math.max(40, Math.round(baseSpeed * 0.45)) : baseSpeed;
 
   useEffect(() => {
@@ -158,20 +292,18 @@ export function App() {
     try {
       let entries: LeaderboardEntry[] = [];
       if (dbEnabled && db) {
-        const leaderboardRef = query(ref(db, "snake_players"), orderByChild("bestScore"), limitToLast(10));
-        const snapshot = await get(leaderboardRef);
-        if (snapshot.exists()) {
-          const data = snapshot.val() as Record<string, any>;
-          entries = Object.entries(data)
-            .map(([key, val]) => ({
-              id: key,
-              name: String(val.name || "Unnamed"),
-              bestScore: Number(val.bestScore || 0),
-              level: Number(val.level || 0),
-              updatedAt: String(val.updatedAt || ""),
-            }))
-            .sort((a, b) => b.bestScore - a.bestScore);
-        }
+        const q = query(collection(db, "snake_players"), orderBy("bestScore", "desc"), limit(10));
+        const snapshot = await getDocs(q);
+        entries = snapshot.docs.map((d) => {
+          const val = d.data();
+          return {
+            id: d.id,
+            name: String(val.name || "Unnamed"),
+            bestScore: Number(val.bestScore || 0),
+            level: Number(val.level || 0),
+            updatedAt: String(val.updatedAt || ""),
+          };
+        });
       } else {
         entries = loadLocalLeaderboard();
       }
@@ -206,18 +338,18 @@ export function App() {
       if (!normalized) return;
       if (dbEnabled && db) {
         const playerKey = toSafeKey(normalized);
-        const playerRef = ref(db, `snake_players/${playerKey}`);
-        const snapshot = await get(playerRef);
+        const playerDoc = doc(db, "snake_players", playerKey);
+        const snapshot = await getDoc(playerDoc);
         const now = new Date().toISOString();
         if (!snapshot.exists()) {
-          await set(playerRef, { name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, updatedAt: now });
+          await setDoc(playerDoc, { name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, updatedAt: now });
         } else {
-          const data = snapshot.val();
+          const data = snapshot.data();
           const previousBest = Number(data.bestScore || 0);
           if (scoreValue > previousBest) {
-            await set(playerRef, { ...data, name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, updatedAt: now });
+            await setDoc(playerDoc, { ...data, name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, updatedAt: now });
           } else {
-            await set(playerRef, { ...data, lastScore: scoreValue, level: levelValue, updatedAt: now });
+            await setDoc(playerDoc, { ...data, lastScore: scoreValue, level: levelValue, updatedAt: now });
           }
         }
         await fetchLeaderboard();
@@ -229,37 +361,62 @@ export function App() {
   );
 
   useEffect(() => { fetchLeaderboard(); }, [fetchLeaderboard]);
+
+  // Award coins + submit score on game over
   useEffect(() => {
-    if (gameOver) {
+    if (gameOver && score > 0) {
+      const newBalance = coinBalance + score;
+      setCoinBalance(newBalance);
+      saveCoinBalance(newBalance);
       submitScore(score, level).catch((error) => {
         console.error("submitScore failed:", error);
         setLeaderboardError("Could not update leaderboard.");
       });
     }
-  }, [gameOver, score, level, submitScore]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameOver]);
 
   useEffect(() => { directionRef.current = direction; pendingDirectionRef.current = direction; }, [direction]);
   useEffect(() => {
     if (score > bestScore) { setBestScore(score); window.localStorage.setItem("snake-best-score", String(score)); }
   }, [score, bestScore]);
+
+  // Level up: generate new obstacles in hard mode
   useEffect(() => {
     const newLevel = Math.min(MAX_LEVEL, Math.floor(score / APPLES_PER_LEVEL));
-    if (newLevel !== level) { setLevel(newLevel); setLevelUpFlash(true); setTimeout(() => setLevelUpFlash(false), 3000); }
-  }, [score, level]);
+    if (newLevel !== level) {
+      setLevel(newLevel);
+      setLevelUpFlash(true);
+      setTimeout(() => setLevelUpFlash(false), 3000);
+      if (difficultyRef.current === "hard") {
+        setObstacles(() => {
+          const snakeKeys = new Set(snake.map(toKey));
+          // Also exclude food
+          snakeKeys.add(toKey(food));
+          return generateObstacles(newLevel, snakeKeys);
+        });
+      }
+    }
+  }, [score, level, snake, food]);
 
-  const resetGame = () => {
+  const obstacleSet = useMemo(() => new Set(obstacles.map(toKey)), [obstacles]);
+
+  const resetGame = useCallback(() => {
     setSnake(START_SNAKE);
     setDirection("right");
     directionRef.current = "right";
     pendingDirectionRef.current = "right";
-    setFood(randomFood(new Set(START_SNAKE.map(toKey))));
+    const startKeys = new Set(START_SNAKE.map(toKey));
+    setFood(randomFood(startKeys));
     setScore(0);
     setLevel(0);
     setGameOver(false);
     setIsRunning(false);
     setBoosting(false);
     boostingRef.current = false;
-  };
+    // Generate initial obstacles for hard mode (level 0 = none)
+    setObstacles([]);
+  }, []);
 
   const queueDirection = useCallback((next: Direction) => {
     const current = pendingDirectionRef.current;
@@ -278,7 +435,6 @@ export function App() {
       if (!next) return;
       event.preventDefault();
       if (!gameOver) setIsRunning(true);
-      // If holding the same direction as current, activate boost
       if (event.repeat && next === pendingDirectionRef.current) {
         if (!boostingRef.current) { boostingRef.current = true; setBoosting(true); }
         return;
@@ -295,13 +451,12 @@ export function App() {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
-  }, [gameOver, queueDirection, screen]);
+  }, [gameOver, queueDirection, screen, resetGame]);
 
   // Swipe anywhere on screen to control snake
   useEffect(() => {
     if (screen !== "playing") return;
     const onTouchStart = (e: TouchEvent) => {
-      // Skip if touching an interactive element (buttons, inputs)
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "BUTTON" || tag === "INPUT" || tag === "LABEL") return;
       touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -328,6 +483,7 @@ export function App() {
     return () => document.body.removeEventListener("touchmove", preventScroll);
   }, []);
 
+  // ─── Game tick ───
   useEffect(() => {
     if (!isRunning || gameOver) return;
     const timer = window.setInterval(() => {
@@ -339,20 +495,21 @@ export function App() {
         let nextHead: Point = { x: head.x + vector.x, y: head.y + vector.y };
         if (!solidWalls) nextHead = { x: (nextHead.x + GRID_SIZE) % GRID_SIZE, y: (nextHead.y + GRID_SIZE) % GRID_SIZE };
         if (solidWalls && (nextHead.x < 0 || nextHead.y < 0 || nextHead.x >= GRID_SIZE || nextHead.y >= GRID_SIZE)) { setGameOver(true); setIsRunning(false); return currentSnake; }
+        // Obstacle collision (hard mode)
+        if (obstacleSet.has(toKey(nextHead))) { setGameOver(true); setIsRunning(false); return currentSnake; }
         const ateFood = nextHead.x === food.x && nextHead.y === food.y;
         const nextSnake = [nextHead, ...currentSnake];
         if (!ateFood) nextSnake.pop();
         if (nextSnake.slice(1).some((s) => s.x === nextHead.x && s.y === nextHead.y)) { setGameOver(true); setIsRunning(false); return currentSnake; }
-        if (ateFood) { setScore((v) => v + 1); setFood(randomFood(new Set(nextSnake.map(toKey)))); }
+        if (ateFood) { setScore((v) => v + 1); setFood(randomFood(new Set([...nextSnake.map(toKey), ...obstacles.map(toKey)]))); }
         return nextSnake;
       });
     }, speed);
     return () => window.clearInterval(timer);
-  }, [food, gameOver, isRunning, solidWalls, speed]);
+  }, [food, gameOver, isRunning, solidWalls, speed, obstacleSet, obstacles]);
 
   const snakeMap = useMemo(() => new Set(snake.map(toKey)), [snake]);
 
-  // Build a lookup: key -> snake index (for fast neighbor checks in render)
   const snakeIndexMap = useMemo(() => {
     const m = new Map<string, number>();
     snake.forEach((s, i) => m.set(toKey(s), i));
@@ -364,6 +521,25 @@ export function App() {
     window.localStorage.setItem("snake-player-name", playerName.trim());
     resetGame();
     setScreen("playing");
+  };
+
+  // ─── Shop actions ───
+  const buySkin = (skinId: string) => {
+    const skin = SNAKE_SKINS.find((s) => s.id === skinId);
+    if (!skin || purchasedSkins.includes(skinId)) return;
+    if (coinBalance < skin.cost) return;
+    const newBalance = coinBalance - skin.cost;
+    const newPurchased = [...purchasedSkins, skinId];
+    setCoinBalance(newBalance);
+    saveCoinBalance(newBalance);
+    setPurchasedSkins(newPurchased);
+    savePurchasedSkins(newPurchased);
+  };
+
+  const selectSkin = (skinId: string) => {
+    if (!purchasedSkins.includes(skinId)) return;
+    setActiveSkinId(skinId);
+    saveActiveSkin(skinId);
   };
 
   const applesInLevel = score % APPLES_PER_LEVEL;
@@ -378,19 +554,17 @@ export function App() {
     </div>
   ) : null;
 
-  // ─── Render a single snake cell with organic shape ───
+  // ─── Render a single snake cell with skin ───
   const renderSnakeCell = (x: number, y: number) => {
     const idx = snakeIndexMap.get(`${x}:${y}`);
     if (idx === undefined) return null;
     const isHead = idx === 0;
     const isTail = idx === snake.length - 1;
+    const skin = activeSkin;
 
-    // Head: direction-aware eyes + fully rounded front
     if (isHead) {
       const dir = pendingDirectionRef.current;
       const radius = getSegmentRadius(snake, idx, cellPct);
-
-      // Eye positions relative to head direction
       let eye1Style: React.CSSProperties = {};
       let eye2Style: React.CSSProperties = {};
       const eyeSize = "18%";
@@ -415,27 +589,25 @@ export function App() {
           style={{
             width: "92%",
             height: "92%",
-            background: "linear-gradient(135deg, #9ef01a 0%, #70e000 100%)",
+            background: skin.headGradient,
             borderRadius: radius,
-            boxShadow: "0 0 8px rgba(158,240,26,0.6)",
+            boxShadow: `0 0 8px ${skin.glowColor}`,
           }}
         >
           <div className="absolute rounded-full bg-white" style={eye1Style}>
-            <div className="absolute inset-[20%] rounded-full bg-[#1a1a2e]" />
+            <div className="absolute inset-[20%] rounded-full" style={{ background: skin.eyeBg }} />
           </div>
           <div className="absolute rounded-full bg-white" style={eye2Style}>
-            <div className="absolute inset-[20%] rounded-full bg-[#1a1a2e]" />
+            <div className="absolute inset-[20%] rounded-full" style={{ background: skin.eyeBg }} />
           </div>
         </div>
       );
     }
 
-    // Tail: tapered with rounded end
     if (isTail) {
       const prev = snake[idx - 1];
       const dx = prev.x - snake[idx].x;
       const dy = prev.y - snake[idx].y;
-      // Taper toward the opposite of the direction to prev
       let clipPath = "";
       if (dx > 0) clipPath = "polygon(30% 15%, 100% 0%, 100% 100%, 30% 85%)";
       else if (dx < 0) clipPath = "polygon(0% 0%, 70% 15%, 70% 85%, 0% 100%)";
@@ -444,14 +616,13 @@ export function App() {
 
       const radius = getSegmentRadius(snake, idx, cellPct);
       const t = idx / snake.length;
-      const green = Math.round(224 - t * 80);
 
       return (
         <div
           style={{
             width: "88%",
             height: "88%",
-            background: `rgb(${Math.round(60 + t * 40)}, ${green}, 0)`,
+            background: skin.tailColor(t),
             borderRadius: radius,
             clipPath,
             opacity: 0.7,
@@ -460,22 +631,17 @@ export function App() {
       );
     }
 
-    // Body: gradient from bright to darker, rounded corners based on neighbors
     const t = idx / snake.length;
-    const green = Math.round(224 - t * 60);
     const radius = getSegmentRadius(snake, idx, cellPct);
-
-    // Subtle scale pattern: alternate slightly different shade
-    const scaleShift = (idx % 2 === 0) ? 8 : 0;
 
     return (
       <div
         style={{
           width: "92%",
           height: "92%",
-          background: `rgb(${Math.round(80 + t * 30)}, ${green + scaleShift}, 0)`,
+          background: skin.bodyColor(t, idx),
           borderRadius: radius,
-          boxShadow: idx < 3 ? "0 0 4px rgba(112,224,0,0.3)" : "none",
+          boxShadow: idx < 3 ? `0 0 4px ${skin.glowColor.replace("0.6", "0.3")}` : "none",
         }}
       />
     );
@@ -491,7 +657,17 @@ export function App() {
       {isRunning && !gameOver && (
         <div className="absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-full bg-[#0d1117]/80 px-2.5 py-0.5 backdrop-blur sm:left-3 sm:top-3 sm:px-3 sm:py-1">
           <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#39ff14] sm:h-2 sm:w-2" />
-          <span className="text-[8px] font-bold uppercase tracking-wider text-[#39ff14] sm:text-[10px]">Session Active</span>
+          <span className="text-[8px] font-bold uppercase tracking-wider text-[#39ff14] sm:text-[10px]">
+            {difficulty === "hard" ? "HARD" : "EASY"}
+          </span>
+        </div>
+      )}
+
+      {/* Coin balance overlay */}
+      {isRunning && !gameOver && (
+        <div className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-full bg-[#0d1117]/80 px-2.5 py-0.5 backdrop-blur sm:right-3 sm:top-3 sm:px-3 sm:py-1">
+          <span className="text-[10px] sm:text-xs">🪙</span>
+          <span className="text-[8px] font-bold text-yellow-400 sm:text-[10px]">{coinBalance + score}</span>
         </div>
       )}
 
@@ -505,20 +681,25 @@ export function App() {
           const key = `${x}:${y}`;
           const isSnake = snakeMap.has(key);
           const isFood = food.x === x && food.y === y;
+          const isObstacle = obstacleSet.has(key);
 
           return (
             <div key={key} className="flex items-center justify-center">
               {isSnake ? (
                 renderSnakeCell(x, y)
               ) : isFood ? (
+                <div className="flex items-center justify-center" style={{ width: "95%", height: "95%", fontSize: "min(4.5vw, 1.5rem)", lineHeight: 1 }}>
+                  <span style={{ filter: "drop-shadow(0 0 4px rgba(255,0,0,0.5))" }}>🍎</span>
+                </div>
+              ) : isObstacle ? (
                 <div
-                  className="animate-pulse"
                   style={{
-                    width: "65%",
-                    height: "65%",
-                    borderRadius: "50%",
-                    background: "radial-gradient(circle at 35% 35%, #ff9a56, #ff4d2b)",
-                    boxShadow: "0 0 10px rgba(255,77,43,0.6), 0 0 20px rgba(255,77,43,0.2)",
+                    width: "85%",
+                    height: "85%",
+                    borderRadius: "3px",
+                    background: "linear-gradient(135deg, #4a3728 0%, #2d1f14 50%, #3e2c1e 100%)",
+                    boxShadow: "inset 1px 1px 2px rgba(255,255,255,0.1), inset -1px -1px 2px rgba(0,0,0,0.3)",
+                    border: "1px solid #1a1008",
                   }}
                 />
               ) : (
@@ -534,6 +715,7 @@ export function App() {
           <p className="text-2xl font-black uppercase tracking-wider text-[#39ff14] drop-shadow-[0_0_10px_rgba(57,255,20,0.5)] sm:text-3xl">Game Over</p>
           <p className="text-xs font-semibold text-[#39ff14]/70 sm:text-sm">{playerName}</p>
           <p className="text-sm text-white sm:text-lg">Score: {score} | Level: {level}</p>
+          <p className="text-xs text-yellow-400">+{score} coins earned!</p>
           <button
             onClick={resetGame}
             className="mt-2 rounded-xl bg-[#39ff14] px-5 py-2 text-xs font-bold text-black transition active:scale-95 sm:px-6 sm:text-sm"
@@ -587,6 +769,78 @@ export function App() {
     </div>
   );
 
+  // ─── Shop panel ───
+  const shopPanel = (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-black uppercase tracking-wider text-[#39ff14] sm:text-lg">Skin Shop</h2>
+        <div className="flex items-center gap-1.5 rounded-full bg-yellow-500/10 px-3 py-1">
+          <span className="text-sm">🪙</span>
+          <span className="text-sm font-black text-yellow-400">{coinBalance}</span>
+        </div>
+      </div>
+      <p className="text-[10px] text-gray-500">Earn coins by scoring points. Coins are awarded after each game.</p>
+      <div className="space-y-2">
+        {SNAKE_SKINS.map((skin) => {
+          const owned = purchasedSkins.includes(skin.id);
+          const isActive = activeSkinId === skin.id;
+          const canAfford = coinBalance >= skin.cost;
+
+          return (
+            <div
+              key={skin.id}
+              className={[
+                "flex items-center justify-between rounded-xl px-3 py-2.5 transition",
+                isActive ? "border border-[#39ff14]/40 bg-[#39ff14]/10" : "bg-[#1a1f1a]",
+              ].join(" ")}
+            >
+              <div className="flex items-center gap-3">
+                {/* Skin preview: small snake segment */}
+                <div
+                  className="h-8 w-8 rounded-lg sm:h-9 sm:w-9"
+                  style={{ background: skin.headGradient, boxShadow: `0 0 6px ${skin.glowColor}` }}
+                />
+                <div>
+                  <p className="text-xs font-bold text-white sm:text-sm">{skin.name}</p>
+                  {!owned && (
+                    <p className="flex items-center gap-1 text-[10px] text-yellow-400">
+                      <span>🪙</span> {skin.cost}
+                    </p>
+                  )}
+                  {owned && !isActive && (
+                    <p className="text-[10px] text-gray-500">Owned</p>
+                  )}
+                  {isActive && (
+                    <p className="text-[10px] font-bold text-[#39ff14]">Equipped</p>
+                  )}
+                </div>
+              </div>
+
+              {!owned ? (
+                <button
+                  onClick={() => buySkin(skin.id)}
+                  disabled={!canAfford}
+                  className="rounded-lg bg-yellow-500 px-3 py-1.5 text-[10px] font-bold text-black transition active:scale-95 disabled:opacity-30 sm:text-xs"
+                >
+                  Buy
+                </button>
+              ) : !isActive ? (
+                <button
+                  onClick={() => selectSkin(skin.id)}
+                  className="rounded-lg border border-[#39ff14]/30 px-3 py-1.5 text-[10px] font-bold text-[#39ff14] transition active:scale-95 sm:text-xs"
+                >
+                  Equip
+                </button>
+              ) : (
+                <span className="rounded-lg bg-[#39ff14]/20 px-3 py-1.5 text-[10px] font-bold text-[#39ff14] sm:text-xs">Active</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   // ─── NAME ENTRY SCREEN ───
   if (screen === "name") {
     return (
@@ -613,6 +867,13 @@ export function App() {
             <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-gray-500 sm:text-xs">Arcade Snake</p>
           </div>
 
+          {/* Coin balance */}
+          <div className="flex items-center gap-2 rounded-full bg-yellow-500/10 px-4 py-1.5">
+            <span className="text-base">🪙</span>
+            <span className="text-base font-black text-yellow-400">{coinBalance}</span>
+            <span className="text-[10px] text-gray-500">coins</span>
+          </div>
+
           <div className="w-full space-y-2">
             <label htmlFor="player-name" className="block text-[10px] font-bold uppercase tracking-wider text-gray-400 sm:text-xs">
               Player Name
@@ -631,12 +892,52 @@ export function App() {
             />
           </div>
 
+          {/* Difficulty selection */}
+          <div className="w-full space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 sm:text-xs">Difficulty</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setDifficulty("easy")}
+                className={[
+                  "rounded-xl px-3 py-2.5 text-sm font-bold transition active:scale-95",
+                  difficulty === "easy"
+                    ? "bg-[#39ff14] text-black shadow-[0_0_15px_rgba(57,255,20,0.3)]"
+                    : "border border-[#39ff14]/20 bg-[#0a0f0a] text-gray-400",
+                ].join(" ")}
+              >
+                Easy
+              </button>
+              <button
+                onClick={() => setDifficulty("hard")}
+                className={[
+                  "rounded-xl px-3 py-2.5 text-sm font-bold transition active:scale-95",
+                  difficulty === "hard"
+                    ? "bg-red-500 text-white shadow-[0_0_15px_rgba(239,68,68,0.3)]"
+                    : "border border-red-500/20 bg-[#0a0f0a] text-gray-400",
+                ].join(" ")}
+              >
+                Hard
+              </button>
+            </div>
+            <p className="text-center text-[9px] text-gray-600">
+              {difficulty === "easy" ? "Normal speed, no obstacles" : "Faster speed + obstacles that increase each level"}
+            </p>
+          </div>
+
           <button
             onClick={startGame}
             disabled={!playerName.trim()}
             className="w-full rounded-2xl bg-[#39ff14] px-6 py-3 text-base font-black uppercase text-black shadow-[0_0_20px_rgba(57,255,20,0.3)] transition hover:shadow-[0_0_30px_rgba(57,255,20,0.5)] active:scale-95 disabled:opacity-30 disabled:shadow-none sm:py-3.5 sm:text-lg"
           >
             Play Game
+          </button>
+
+          {/* Skin Shop button */}
+          <button
+            onClick={() => setScreen("shop")}
+            className="w-full rounded-2xl border border-yellow-500/30 bg-yellow-500/10 px-6 py-2.5 text-sm font-bold text-yellow-400 transition active:scale-95 sm:text-base"
+          >
+            🐍 Skin Shop
           </button>
 
           <div className="grid w-full grid-cols-2 gap-3 text-center">
@@ -649,6 +950,27 @@ export function App() {
               <p className="text-[9px] uppercase tracking-wider text-gray-500 sm:text-[10px]">Best Score</p>
             </div>
           </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ─── SHOP SCREEN ───
+  if (screen === "shop") {
+    return (
+      <main className="relative flex min-h-[100dvh] flex-col items-center overflow-y-auto bg-[#0d1117] px-4 py-6">
+        {updateBanner}
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(57,255,20,0.03)_1px,transparent_1px),linear-gradient(to_bottom,rgba(57,255,20,0.03)_1px,transparent_1px)] bg-[size:40px_40px]" />
+
+        <div className="relative w-full max-w-sm">
+          <button
+            onClick={() => setScreen("name")}
+            className="mb-4 flex items-center gap-2 text-sm font-bold text-gray-400 transition hover:text-white"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4"><path d="M19 12H5m7-7-7 7 7 7"/></svg>
+            Back
+          </button>
+          {shopPanel}
         </div>
       </main>
     );
@@ -673,18 +995,15 @@ export function App() {
         </h1>
         <button
           onClick={() => setSolidWalls((w) => !w)}
-          className={["flex h-8 w-8 items-center justify-center rounded-lg transition sm:h-9 sm:w-9", solidWalls ? "text-[#39ff14]" : "text-gray-500"].join(" ")}
+          className={["flex h-8 w-8 items-center justify-center rounded-lg text-[10px] font-bold transition sm:h-9 sm:w-9 sm:text-xs", solidWalls ? "text-[#39ff14]" : "text-gray-500"].join(" ")}
           title={solidWalls ? "Solid walls ON" : "Wrap-around"}
         >
-          {solidWalls?'Wall':'Wall'}
-
-          {/* <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 sm:h-5 sm:w-5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> */}
+          Wall
         </button>
       </header>
 
       {/* ── Desktop layout (lg+): game board full + sidebar ── */}
       <div className="relative z-10 hidden min-h-0 flex-1 gap-4 px-4 pb-4 lg:flex">
-        {/* Game board — fills all available height */}
         <div className="flex flex-1 items-center justify-center">
           <div className="h-full max-h-full" style={{ aspectRatio: "1" }}>
             {gameBoard}
@@ -693,13 +1012,20 @@ export function App() {
 
         {/* Desktop sidebar */}
         <aside className="flex w-72 flex-shrink-0 flex-col gap-3 overflow-y-auto xl:w-80">
-          {/* Player */}
           <div className="flex items-center justify-between rounded-xl bg-[#1a1f1a] px-4 py-2">
-            <span className="text-sm font-bold text-white">{playerName}</span>
-            {boosting && <span className="animate-pulse rounded-full bg-orange-500/20 px-2 py-0.5 text-[9px] font-bold text-orange-400">BOOST</span>}
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold text-white">{playerName}</span>
+              {difficulty === "hard" && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[8px] font-bold text-red-400">HARD</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              {boosting && <span className="animate-pulse rounded-full bg-orange-500/20 px-2 py-0.5 text-[9px] font-bold text-orange-400">BOOST</span>}
+              <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-0.5">
+                <span className="text-[10px]">🪙</span>
+                <span className="text-[10px] font-bold text-yellow-400">{coinBalance}</span>
+              </div>
+            </div>
           </div>
 
-          {/* Stats */}
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl bg-[#1a1f1a] px-4 py-3">
               <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Score</p>
@@ -734,7 +1060,6 @@ export function App() {
             </div>
           </div>
 
-          {/* Level progress */}
           <div className="flex items-center gap-2 px-0.5">
             <span className="text-[10px] font-bold text-gray-500">LVL {level}</span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#1a1f1a]">
@@ -743,7 +1068,6 @@ export function App() {
             <span className="text-[10px] font-bold text-gray-500">{level >= MAX_LEVEL ? "MAX" : `LVL ${level + 1}`}</span>
           </div>
 
-          {/* Controls */}
           <div className="flex items-center gap-2">
             <button
               onClick={() => { if (gameOver) resetGame(); else setIsRunning((r) => !r); }}
@@ -761,7 +1085,6 @@ export function App() {
 
           <p className="text-center text-[10px] text-gray-600">Arrow keys / WASD to move, hold to boost, Space to pause</p>
 
-          {/* Leaderboard */}
           {leaderboardPanel}
         </aside>
       </div>
@@ -770,7 +1093,6 @@ export function App() {
       <div className="relative z-10 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-20 sm:gap-3 sm:px-4 sm:pb-24 lg:hidden">
         {mobileTab === "play" ? (
           <>
-            {/* Stat cards row 1 */}
             <div className="grid grid-cols-2 gap-2 sm:gap-3">
               <div className="rounded-xl bg-[#1a1f1a] px-3 py-2 sm:rounded-2xl sm:px-4 sm:py-3">
                 <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[10px]">Current Score</p>
@@ -790,7 +1112,6 @@ export function App() {
               </div>
             </div>
 
-            {/* Stat cards row 2 */}
             <div className="grid grid-cols-2 gap-2 sm:gap-3">
               <div className="flex items-center gap-2 rounded-xl bg-[#1a1f1a] px-3 py-2 sm:gap-3 sm:rounded-2xl sm:px-4 sm:py-2.5">
                 <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-orange-500/10 sm:h-8 sm:w-8">
@@ -802,17 +1123,16 @@ export function App() {
                 </div>
               </div>
               <div className="flex items-center gap-2 rounded-xl bg-[#1a1f1a] px-3 py-2 sm:gap-3 sm:rounded-2xl sm:px-4 sm:py-2.5">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#39ff14]/10 sm:h-8 sm:w-8">
-                  <svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5 text-[#39ff14] sm:h-4 sm:w-4"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-yellow-500/10 sm:h-8 sm:w-8">
+                  <span className="text-sm">🪙</span>
                 </div>
                 <div>
-                  <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[9px]">Best</p>
-                  <p className="text-sm font-black text-[#39ff14] sm:text-base">{bestScore.toLocaleString()}</p>
+                  <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[9px]">Coins</p>
+                  <p className="text-sm font-black text-yellow-400 sm:text-base">{coinBalance}</p>
                 </div>
               </div>
             </div>
 
-            {/* Level progress */}
             <div className="flex items-center gap-2 px-0.5">
               <span className="text-[8px] font-bold text-gray-500 sm:text-[10px]">LVL {level}</span>
               <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#1a1f1a] sm:h-1.5">
@@ -826,21 +1146,18 @@ export function App() {
               </span>
             </div>
 
-            {/* Boost indicator */}
             {boosting && (
               <div className="flex items-center justify-center">
                 <span className="animate-pulse rounded-full bg-orange-500/20 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-orange-400">Boost Active</span>
               </div>
             )}
 
-            {/* Game board — fill available space */}
             <div className="flex min-h-0 flex-1 items-center justify-center">
               <div className="h-full max-h-full w-full" style={{ aspectRatio: "1", maxWidth: "100%" }}>
                 {gameBoard}
               </div>
             </div>
 
-            {/* Floating pause/play button */}
             <div className="flex justify-end px-2 py-1">
               <button
                 onClick={() => { if (gameOver) resetGame(); else setIsRunning((r) => !r); }}
@@ -856,8 +1173,10 @@ export function App() {
               </button>
             </div>
           </>
-        ) : (
+        ) : mobileTab === "ranks" ? (
           <div className="py-2">{leaderboardPanel}</div>
+        ) : (
+          <div className="py-2">{shopPanel}</div>
         )}
       </div>
 
@@ -875,6 +1194,20 @@ export function App() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5 sm:h-6 sm:w-6"><path d="M21 6H3a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zM7 15H5v-2H7v2zm0-4H5V9H7v2zm4 0H9V9h2v2zm8 4h-2v-2h2v2zm0-4h-2V9h2v2z"/></svg>
           )}
           <span className="text-[9px] font-bold uppercase sm:text-[10px]">Play</span>
+        </button>
+
+        <button
+          onClick={() => setMobileTab("shop")}
+          className={["flex flex-col items-center gap-0.5 transition", mobileTab === "shop" ? "text-yellow-400" : "text-gray-500"].join(" ")}
+        >
+          {mobileTab === "shop" ? (
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.3)] sm:h-12 sm:w-12 sm:rounded-2xl">
+              <span className="text-lg">🐍</span>
+            </div>
+          ) : (
+            <span className="text-xl sm:text-2xl">🐍</span>
+          )}
+          <span className="text-[9px] font-bold uppercase sm:text-[10px]">Skins</span>
         </button>
 
         <button
