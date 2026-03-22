@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Neon Slither - Snake Game</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0e1a;color:#fff;font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden;height:100vh;width:100vw;display:flex;align-items:center;justify-content:center;user-select:none}
+canvas{display:block;border-radius:16px;image-rendering:auto}
+
+/* Overlays */
+.overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:10;background:rgba(10,14,26,0.92);backdrop-filter:blur(8px);transition:opacity .3s}
+.overlay.hidden{opacity:0;pointer-events:none}
+.panel{background:linear-gradient(135deg,#111827,#0f172a);border:1px solid rgba(57,255,20,0.15);border-radius:24px;padding:32px;max-width:420px;width:90%;text-align:center;box-shadow:0 0 60px rgba(57,255,20,0.05)}
+.panel h1{font-size:2rem;font-weight:900;text-transform:uppercase;letter-spacing:3px;color:#39ff14;text-shadow:0 0 20px rgba(57,255,20,0.4);margin-bottom:4px;font-style:italic}
+.panel .sub{font-size:.7rem;letter-spacing:4px;color:#666;text-transform:uppercase;margin-bottom:20px}
+.panel h2{font-size:1rem;font-weight:700;color:#39ff14;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px}
+
+/* Fruit grid */
+.fruit-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}
+.fruit-btn{background:#1a1f2e;border:2px solid transparent;border-radius:16px;padding:14px 8px;cursor:pointer;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:6px}
+.fruit-btn:hover{background:#1f2940;border-color:rgba(57,255,20,0.3)}
+.fruit-btn.selected{background:rgba(57,255,20,0.1);border-color:#39ff14;box-shadow:0 0 15px rgba(57,255,20,0.15)}
+.fruit-btn .emoji{font-size:2rem;line-height:1}
+.fruit-btn .fname{font-size:.65rem;font-weight:700;color:#999;text-transform:uppercase;letter-spacing:1px}
+.fruit-btn .fpts{font-size:.6rem;color:#39ff14;font-weight:600}
+.fruit-btn.selected .fname{color:#39ff14}
+
+/* Buttons */
+.btn{display:inline-block;background:#39ff14;color:#000;font-weight:900;font-size:.9rem;text-transform:uppercase;letter-spacing:2px;border:none;border-radius:14px;padding:14px 32px;cursor:pointer;transition:all .2s;box-shadow:0 0 20px rgba(57,255,20,0.3)}
+.btn:hover{box-shadow:0 0 30px rgba(57,255,20,0.5);transform:scale(1.02)}
+.btn:active{transform:scale(0.97)}
+.btn:disabled{opacity:.3;cursor:default;box-shadow:none;transform:none}
+
+/* HUD */
+#hud{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;justify-content:space-between;padding:12px 20px;pointer-events:none}
+#hud>*{pointer-events:auto}
+.hud-pill{background:rgba(17,24,39,0.85);backdrop-filter:blur(6px);border:1px solid rgba(57,255,20,0.1);border-radius:12px;padding:6px 14px;font-size:.75rem;font-weight:700;display:flex;align-items:center;gap:6px}
+.hud-score{color:#39ff14;font-size:1.1rem;font-weight:900;text-shadow:0 0 8px rgba(57,255,20,0.3)}
+.hud-fruit{font-size:1.1rem}
+#musicBtn{background:rgba(17,24,39,0.85);backdrop-filter:blur(6px);border:1px solid rgba(57,255,20,0.15);border-radius:10px;padding:6px 12px;color:#39ff14;font-size:.7rem;font-weight:700;cursor:pointer;letter-spacing:1px;text-transform:uppercase;transition:all .2s}
+#musicBtn:hover{background:rgba(57,255,20,0.1)}
+#musicBtn.off{color:#555;border-color:rgba(255,255,255,0.05)}
+
+/* Game over */
+.go-score{font-size:3rem;font-weight:900;color:#39ff14;text-shadow:0 0 20px rgba(57,255,20,0.4);margin:8px 0}
+.go-label{font-size:.7rem;color:#666;text-transform:uppercase;letter-spacing:3px}
+.go-msg{color:#999;font-size:.85rem;margin:16px 0 24px}
+</style>
+</head>
+<body>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div class="hud-pill">
+    <span class="hud-fruit" id="hudFruit">🍎</span>
+    <span class="hud-score" id="hudScore">0</span>
+  </div>
+  <button id="musicBtn" class="off" onclick="toggleMusic()">Music: Off</button>
+</div>
+
+<!-- Canvas -->
+<canvas id="gameCanvas"></canvas>
+
+<!-- Fruit Selection Screen -->
+<div class="overlay" id="startScreen">
+  <div class="panel">
+    <h1>Neon Slither</h1>
+    <div class="sub">Arcade Snake</div>
+    <h2>Choose Your Fruit</h2>
+    <div class="fruit-grid" id="fruitGrid"></div>
+    <button class="btn" id="startBtn" onclick="startGame()">Play</button>
+  </div>
+</div>
+
+<!-- Game Over Screen -->
+<div class="overlay hidden" id="gameOverScreen">
+  <div class="panel">
+    <h1>Game Over</h1>
+    <div class="go-label">Final Score</div>
+    <div class="go-score" id="finalScore">0</div>
+    <div class="go-msg" id="goMsg">Nice run!</div>
+    <button class="btn" onclick="showStart()">Play Again</button>
+  </div>
+</div>
+
+<script>
+// ─── Config ───
+const GRID = 20;
+const LERP_SPEED = 12;
+
+const FRUITS = [
+  { id: 'apple',      emoji: '🍎', name: 'Apple',      pts: 1,  speed: 0   },
+  { id: 'cherry',     emoji: '🍒', name: 'Cherry',     pts: 2,  speed: 0.4 },
+  { id: 'watermelon', emoji: '🍉', name: 'Watermelon', pts: 3,  speed:-0.3 },
+  { id: 'banana',     emoji: '🍌', name: 'Banana',     pts: 1,  speed: 0.6 },
+  { id: 'grape',      emoji: '🍇', name: 'Grape',      pts: 2,  speed: 0   },
+  { id: 'strawberry', emoji: '🍓', name: 'Strawberry', pts: 2,  speed: 0.2 },
+];
+
+let selectedFruit = FRUITS[0];
+
+// ─── Canvas setup ───
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W, H, cellSize;
+
+function resize() {
+  const pad = 24;
+  const maxW = window.innerWidth - pad;
+  const maxH = window.innerHeight - pad;
+  const size = Math.min(maxW, maxH, 600);
+  cellSize = size / GRID;
+  W = H = size;
+  canvas.width = size * devicePixelRatio;
+  canvas.height = size * devicePixelRatio;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Fruit selection UI ───
+const fruitGrid = document.getElementById('fruitGrid');
+FRUITS.forEach((f, i) => {
+  const btn = document.createElement('div');
+  btn.className = 'fruit-btn' + (i === 0 ? ' selected' : '');
+  btn.innerHTML = `<span class="emoji">${f.emoji}</span><span class="fname">${f.name}</span><span class="fpts">+${f.pts} pt${f.pts > 1 ? 's' : ''}${f.speed > 0 ? ' / Fast' : f.speed < 0 ? ' / Slow' : ''}</span>`;
+  btn.onclick = () => {
+    document.querySelectorAll('.fruit-btn').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+    selectedFruit = f;
+  };
+  fruitGrid.appendChild(btn);
+});
+
+// ─── Game State ───
+let snake, dir, nextDir, food, score, gameRunning, moveTimer, moveInterval;
+let baseInterval = 0.13;
+
+// Visual state — smooth positions
+let snakeVisual = [];   // {x, y} floats for each segment
+let foodVisual = { x: 0, y: 0, scale: 0, bob: 0 };
+let particles = [];
+let gameOverAnim = 0;
+let lastTime = 0;
+
+// Direction vectors
+const DIRS = { up:{x:0,y:-1}, down:{x:0,y:1}, left:{x:-1,y:0}, right:{x:1,y:0} };
+const OPP = { up:'down', down:'up', left:'right', right:'left' };
+
+function initGame() {
+  const mid = Math.floor(GRID / 2);
+  snake = [ {x:mid,y:mid}, {x:mid-1,y:mid}, {x:mid-2,y:mid} ];
+  dir = 'right';
+  nextDir = 'right';
+  score = 0;
+  moveInterval = baseInterval;
+  moveTimer = 0;
+  gameOverAnim = 0;
+  particles = [];
+
+  // Init visual positions to match grid
+  snakeVisual = snake.map(s => ({ x: s.x, y: s.y }));
+
+  spawnFood();
+  updateHUD();
+}
+
+function spawnFood() {
+  const occupied = new Set(snake.map(s => s.x + ',' + s.y));
+  let fx, fy;
+  do {
+    fx = Math.floor(Math.random() * GRID);
+    fy = Math.floor(Math.random() * GRID);
+  } while (occupied.has(fx + ',' + fy));
+  food = { x: fx, y: fy };
+  foodVisual = { x: fx, y: fy, scale: 0, bob: 0 };
+}
+
+// ─── Input ───
+const keyMap = {
+  ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right',
+  w:'up', W:'up', s:'down', S:'down', a:'left', A:'left', d:'right', D:'right'
+};
+document.addEventListener('keydown', e => {
+  const d = keyMap[e.key];
+  if (d && gameRunning && OPP[dir] !== d) { nextDir = d; e.preventDefault(); }
+});
+
+// Touch / swipe
+let touchStart = null;
+document.addEventListener('touchstart', e => {
+  if (!gameRunning) return;
+  touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: true });
+document.addEventListener('touchend', e => {
+  if (!touchStart || !gameRunning) return;
+  const dx = e.changedTouches[0].clientX - touchStart.x;
+  const dy = e.changedTouches[0].clientY - touchStart.y;
+  touchStart = null;
+  if (Math.abs(dx) < 20 && Math.abs(dy) < 20) return;
+  const d = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+  if (OPP[dir] !== d) nextDir = d;
+}, { passive: true });
+
+// ─── Game logic tick ───
+function gameTick() {
+  dir = nextDir;
+  const head = snake[0];
+  const v = DIRS[dir];
+  const nh = { x: head.x + v.x, y: head.y + v.y };
+
+  // Wall collision
+  if (nh.x < 0 || nh.x >= GRID || nh.y < 0 || nh.y >= GRID) { endGame(); return; }
+  // Self collision
+  if (snake.some(s => s.x === nh.x && s.y === nh.y)) { endGame(); return; }
+
+  snake.unshift(nh);
+
+  // Add visual segment starting from the previous head position
+  snakeVisual.unshift({ x: head.x, y: head.y });
+
+  const ate = nh.x === food.x && nh.y === food.y;
+  if (ate) {
+    score += selectedFruit.pts;
+    spawnParticles(food.x, food.y);
+    playEatSound();
+    spawnFood();
+    // Speed up slightly
+    moveInterval = Math.max(0.045, baseInterval - score * 0.002 + (selectedFruit.speed * -0.01));
+    updateHUD();
+  } else {
+    snake.pop();
+    snakeVisual.pop();
+  }
+}
+
+function endGame() {
+  gameRunning = false;
+  gameOverAnim = 1;
+  playDeathSound();
+  document.getElementById('finalScore').textContent = score;
+  const msgs = ['Nice run!','So close!','Try again!','You can do better!','Great effort!'];
+  if (score >= 30) msgs.push('Incredible!','Beast mode!');
+  if (score >= 50) msgs.push('Legendary!');
+  document.getElementById('goMsg').textContent = msgs[Math.floor(Math.random() * msgs.length)];
+  setTimeout(() => {
+    document.getElementById('gameOverScreen').classList.remove('hidden');
+    document.getElementById('hud').classList.add('hidden');
+  }, 600);
+}
+
+function updateHUD() {
+  document.getElementById('hudScore').textContent = score;
+}
+
+// ─── Particles ───
+function spawnParticles(gx, gy) {
+  const cx = (gx + 0.5) * cellSize;
+  const cy = (gy + 0.5) * cellSize;
+  for (let i = 0; i < 12; i++) {
+    const angle = (Math.PI * 2 / 12) * i + Math.random() * 0.5;
+    const speed = 80 + Math.random() * 120;
+    particles.push({
+      x: cx, y: cy,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1,
+      decay: 1.5 + Math.random() * 1.5,
+      size: 2 + Math.random() * 3,
+      color: Math.random() > 0.5 ? '#39ff14' : '#ffdd00'
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.96;
+    p.vy *= 0.96;
+    p.life -= p.decay * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ─── Rendering ───
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function update(dt) {
+  if (!gameRunning) return;
+
+  moveTimer += dt;
+  while (moveTimer >= moveInterval) {
+    moveTimer -= moveInterval;
+    gameTick();
+    if (!gameRunning) return;
+  }
+
+  // Smoothly interpolate visual positions toward logical grid positions
+  for (let i = 0; i < snakeVisual.length; i++) {
+    const target = snake[i];
+    if (!target) continue;
+    const rate = i === 0 ? LERP_SPEED * 1.8 : LERP_SPEED;
+    snakeVisual[i].x = lerp(snakeVisual[i].x, target.x, Math.min(1, rate * dt));
+    snakeVisual[i].y = lerp(snakeVisual[i].y, target.y, Math.min(1, rate * dt));
+  }
+
+  // Food animation
+  foodVisual.scale = lerp(foodVisual.scale, 1, Math.min(1, 8 * dt));
+  foodVisual.bob += dt * 3;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  ctx.fillStyle = '#080c14';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, W, H, 16);
+  ctx.fill();
+
+  // Grid dots
+  ctx.fillStyle = '#111825';
+  for (let gx = 0; gx < GRID; gx++) {
+    for (let gy = 0; gy < GRID; gy++) {
+      ctx.beginPath();
+      ctx.arc((gx + 0.5) * cellSize, (gy + 0.5) * cellSize, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Border glow
+  ctx.strokeStyle = 'rgba(57,255,20,0.15)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(1, 1, W - 2, H - 2, 16);
+  ctx.stroke();
+
+  if (!gameRunning && gameOverAnim > 0) {
+    drawSnake(Math.max(0.2, 1 - gameOverAnim * 0.8));
+    drawFood();
+    drawParticles();
+    return;
+  }
+
+  drawFood();
+  drawSnake(1);
+  drawParticles();
+}
+
+function drawFood() {
+  const s = foodVisual.scale;
+  const bob = Math.sin(foodVisual.bob) * 2;
+  const cx = (food.x + 0.5) * cellSize;
+  const cy = (food.y + 0.5) * cellSize + bob;
+  const size = cellSize * 0.7 * s;
+
+  // Glow
+  ctx.save();
+  ctx.globalAlpha = 0.3 * s;
+  ctx.shadowColor = '#ff4444';
+  ctx.shadowBlur = 15;
+  ctx.beginPath();
+  ctx.arc(cx, cy, size * 0.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff4444';
+  ctx.fill();
+  ctx.restore();
+
+  // Emoji
+  ctx.save();
+  ctx.font = `${size}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.globalAlpha = s;
+  ctx.fillText(selectedFruit.emoji, cx, cy + 1);
+  ctx.restore();
+}
+
+function drawSnake(alpha) {
+  if (snakeVisual.length < 2) return;
+  const pts = snakeVisual.map(s => ({ x: (s.x + 0.5) * cellSize, y: (s.y + 0.5) * cellSize }));
+  const total = pts.length;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Draw body as thick smooth path with taper
+  // We draw multiple overlapping circles along a catmull-rom spline
+  const splinePts = buildSpline(pts, 4);
+  const splineLen = splinePts.length;
+
+  for (let i = splineLen - 1; i >= 0; i--) {
+    const t = i / splineLen;
+    const progress = 1 - t; // 0=head, 1=tail
+
+    // Taper: thick at head, thin at tail
+    const maxR = cellSize * 0.42;
+    const minR = cellSize * 0.12;
+    // Ease the taper
+    const taper = 1 - progress * progress;
+    const radius = minR + (maxR - minR) * taper;
+
+    // Color gradient along body
+    const r = Math.round(lerp(30, 60, progress));
+    const g = Math.round(lerp(255, 120, progress));
+    const b = Math.round(lerp(20, 0, progress));
+
+    ctx.beginPath();
+    ctx.arc(splinePts[i].x, splinePts[i].y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fill();
+  }
+
+  // Head highlight
+  const head = pts[0];
+  const headR = cellSize * 0.44;
+
+  // Glow
+  ctx.shadowColor = '#39ff14';
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.arc(head.x, head.y, headR, 0, Math.PI * 2);
+  const hGrad = ctx.createRadialGradient(head.x - headR * 0.2, head.y - headR * 0.2, 0, head.x, head.y, headR);
+  hGrad.addColorStop(0, '#b0ff60');
+  hGrad.addColorStop(1, '#39cc10');
+  ctx.fillStyle = hGrad;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Eyes
+  const dv = DIRS[dir] || DIRS.right;
+  // Perpendicular
+  const px = -dv.y;
+  const py = dv.x;
+  const eyeOff = headR * 0.35;
+  const eyeFwd = headR * 0.25;
+  const eyeR = headR * 0.22;
+  const pupilR = eyeR * 0.55;
+
+  for (const side of [-1, 1]) {
+    const ex = head.x + dv.x * eyeFwd + px * eyeOff * side;
+    const ey = head.y + dv.y * eyeFwd + py * eyeOff * side;
+
+    // White
+    ctx.beginPath();
+    ctx.arc(ex, ey, eyeR, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+
+    // Pupil
+    ctx.beginPath();
+    ctx.arc(ex + dv.x * eyeR * 0.25, ey + dv.y * eyeR * 0.25, pupilR, 0, Math.PI * 2);
+    ctx.fillStyle = '#111';
+    ctx.fill();
+  }
+
+  // Subtle shine on head
+  ctx.beginPath();
+  ctx.arc(head.x - headR * 0.2, head.y - headR * 0.3, headR * 0.15, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// Catmull-Rom spline interpolation for smooth curves
+function buildSpline(pts, subdivisions) {
+  if (pts.length < 2) return pts.slice();
+  const result = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    for (let j = 0; j < subdivisions; j++) {
+      const t = j / subdivisions;
+      result.push(catmullRom(p0, p1, p2, p3, t));
+    }
+  }
+  result.push(pts[pts.length - 1]);
+  return result;
+}
+
+function catmullRom(p0, p1, p2, p3, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return {
+    x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2*p0.x - 5*p1.x + 4*p2.x - p3.x) * t2 + (-p0.x + 3*p1.x - 3*p2.x + p3.x) * t3),
+    y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 + (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3),
+  };
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ─── Main Loop ───
+function loop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  update(dt);
+  updateParticles(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+// ─── Screen Management ───
+function showStart() {
+  document.getElementById('gameOverScreen').classList.add('hidden');
+  document.getElementById('startScreen').classList.remove('hidden');
+  document.getElementById('hud').classList.add('hidden');
+  gameRunning = false;
+}
+
+function startGame() {
+  document.getElementById('startScreen').classList.add('hidden');
+  document.getElementById('hud').classList.remove('hidden');
+  document.getElementById('hudFruit').textContent = selectedFruit.emoji;
+  initGame();
+  gameRunning = true;
+}
+
+// ─── Web Audio Music ───
+let audioCtx = null;
+let musicPlaying = false;
+let musicNodes = [];
+let musicInterval = null;
+
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function playEatSound() {
+  try {
+    const ac = getAudioCtx();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(600, ac.currentTime);
+    o.frequency.exponentialRampToValueAtTime(1200, ac.currentTime + 0.08);
+    o.frequency.exponentialRampToValueAtTime(800, ac.currentTime + 0.15);
+    g.gain.setValueAtTime(0.15, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.2);
+    o.connect(g).connect(ac.destination);
+    o.start(ac.currentTime);
+    o.stop(ac.currentTime + 0.2);
+  } catch(e) {}
+}
+
+function playDeathSound() {
+  try {
+    const ac = getAudioCtx();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(400, ac.currentTime);
+    o.frequency.exponentialRampToValueAtTime(80, ac.currentTime + 0.5);
+    g.gain.setValueAtTime(0.12, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.5);
+    o.connect(g).connect(ac.destination);
+    o.start(ac.currentTime);
+    o.stop(ac.currentTime + 0.5);
+  } catch(e) {}
+}
+
+// Procedural chiptune music
+const MELODY_NOTES = [
+  // Cmaj pentatonic vibes — frequencies
+  261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3,
+  523.3, 440.0, 392.0, 329.6, 293.7, 261.6, 329.6, 392.0,
+];
+const BASS_NOTES = [130.8, 130.8, 164.8, 164.8, 174.6, 174.6, 196.0, 196.0];
+let melodyIdx = 0;
+let bassIdx = 0;
+
+function playMusicNote() {
+  try {
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+
+    // Melody - square wave
+    const osc1 = ac.createOscillator();
+    const g1 = ac.createGain();
+    osc1.type = 'square';
+    osc1.frequency.value = MELODY_NOTES[melodyIdx % MELODY_NOTES.length];
+    g1.gain.setValueAtTime(0.06, now);
+    g1.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    osc1.connect(g1).connect(ac.destination);
+    osc1.start(now);
+    osc1.stop(now + 0.19);
+    melodyIdx++;
+
+    // Bass - triangle wave (every other beat)
+    if (melodyIdx % 2 === 0) {
+      const osc2 = ac.createOscillator();
+      const g2 = ac.createGain();
+      osc2.type = 'triangle';
+      osc2.frequency.value = BASS_NOTES[bassIdx % BASS_NOTES.length];
+      g2.gain.setValueAtTime(0.08, now);
+      g2.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+      osc2.connect(g2).connect(ac.destination);
+      osc2.start(now);
+      osc2.stop(now + 0.31);
+      bassIdx++;
+    }
+
+    // Hi-hat noise (every beat)
+    const bufLen = ac.sampleRate * 0.03;
+    const buf = ac.createBuffer(1, bufLen, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = (Math.random() * 2 - 1) * 0.3;
+    const noise = ac.createBufferSource();
+    const gn = ac.createGain();
+    noise.buffer = buf;
+    gn.gain.setValueAtTime(0.04, now);
+    gn.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+    noise.connect(gn).connect(ac.destination);
+    noise.start(now);
+  } catch(e) {}
+}
+
+function toggleMusic() {
+  const btn = document.getElementById('musicBtn');
+  if (musicPlaying) {
+    clearInterval(musicInterval);
+    musicInterval = null;
+    musicPlaying = false;
+    btn.textContent = 'Music: Off';
+    btn.classList.add('off');
+  } else {
+    getAudioCtx();
+    melodyIdx = 0;
+    bassIdx = 0;
+    const bpm = 180;
+    musicInterval = setInterval(playMusicNote, 60000 / bpm);
+    playMusicNote();
+    musicPlaying = true;
+    btn.textContent = 'Music: On';
+    btn.classList.remove('off');
+  }
+}
+
+// ─── Init ───
+initGame();
+lastTime = performance.now();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

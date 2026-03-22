@@ -271,6 +271,33 @@ export function App() {
   useEffect(() => {
     const storedBest = window.localStorage.getItem("snake-best-score");
     if (storedBest) setBestScore(Number(storedBest) || 0);
+    // Auto-fetch user profile from Firestore if username is saved
+    const savedName = window.localStorage.getItem("snake-player-name");
+    if (savedName && dbEnabled && db) {
+      const playerKey = toSafeKey(savedName);
+      const playerDoc = doc(db, "snake_players", playerKey);
+      getDoc(playerDoc).then((snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          const remoteCoins = Number(data.coins || 0);
+          setCoinBalance(remoteCoins);
+          saveCoinBalance(remoteCoins);
+          const remoteBest = Number(data.bestScore || 0);
+          if (remoteBest > 0) {
+            setBestScore(remoteBest);
+            window.localStorage.setItem("snake-best-score", String(remoteBest));
+          }
+          if (Array.isArray(data.purchasedSkins) && data.purchasedSkins.length > 0) {
+            setPurchasedSkins(data.purchasedSkins);
+            savePurchasedSkins(data.purchasedSkins);
+          }
+          if (data.activeSkin && typeof data.activeSkin === "string") {
+            setActiveSkinId(data.activeSkin);
+            saveActiveSkin(data.activeSkin);
+          }
+        }
+      }).catch(() => {});
+    }
   }, []);
 
   const loadLocalLeaderboard = () => {
@@ -332,8 +359,33 @@ export function App() {
     setLeaderboard(sorted);
   };
 
+  // Sync coins & skins to Firestore for the current user
+  const syncUserToFirestore = useCallback(
+    async (overrides?: { coins?: number; skins?: string[] }) => {
+      const normalized = playerName.trim();
+      if (!normalized || !dbEnabled || !db) return;
+      const playerKey = toSafeKey(normalized);
+      const playerDoc = doc(db, "snake_players", playerKey);
+      try {
+        const snapshot = await getDoc(playerDoc);
+        const prev = snapshot.exists() ? snapshot.data() : {};
+        await setDoc(playerDoc, {
+          ...prev,
+          name: normalized,
+          coins: overrides?.coins ?? coinBalance,
+          purchasedSkins: overrides?.skins ?? purchasedSkins,
+          activeSkin: activeSkinId,
+          updatedAt: new Date().toISOString(),
+        }, { merge: true });
+      } catch (e) {
+        console.warn("syncUserToFirestore failed:", e);
+      }
+    },
+    [playerName, coinBalance, purchasedSkins, activeSkinId]
+  );
+
   const submitScore = useCallback(
-    async (scoreValue: number, levelValue: number) => {
+    async (scoreValue: number, levelValue: number, newCoinBalance: number) => {
       const normalized = playerName.trim();
       if (!normalized) return;
       if (dbEnabled && db) {
@@ -342,22 +394,22 @@ export function App() {
         const snapshot = await getDoc(playerDoc);
         const now = new Date().toISOString();
         if (!snapshot.exists()) {
-          await setDoc(playerDoc, { name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, updatedAt: now });
+          await setDoc(playerDoc, { name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, coins: newCoinBalance, purchasedSkins, activeSkin: activeSkinId, updatedAt: now });
         } else {
           const data = snapshot.data();
           const previousBest = Number(data.bestScore || 0);
+          const updates: Record<string, unknown> = { lastScore: scoreValue, level: levelValue, coins: newCoinBalance, purchasedSkins, activeSkin: activeSkinId, updatedAt: now };
           if (scoreValue > previousBest) {
-            await setDoc(playerDoc, { ...data, name: normalized, bestScore: scoreValue, level: levelValue, lastScore: scoreValue, updatedAt: now });
-          } else {
-            await setDoc(playerDoc, { ...data, lastScore: scoreValue, level: levelValue, updatedAt: now });
+            updates.bestScore = scoreValue;
           }
+          await setDoc(playerDoc, { ...data, name: normalized, ...updates });
         }
         await fetchLeaderboard();
       } else {
         updateLocalLeaderboard(normalized, scoreValue, levelValue);
       }
     },
-    [fetchLeaderboard, playerName]
+    [fetchLeaderboard, playerName, purchasedSkins, activeSkinId]
   );
 
   useEffect(() => { fetchLeaderboard(); }, [fetchLeaderboard]);
@@ -368,7 +420,7 @@ export function App() {
       const newBalance = coinBalance + score;
       setCoinBalance(newBalance);
       saveCoinBalance(newBalance);
-      submitScore(score, level).catch((error) => {
+      submitScore(score, level, newBalance).catch((error) => {
         console.error("submitScore failed:", error);
         setLeaderboardError("Could not update leaderboard.");
       });
@@ -516,9 +568,45 @@ export function App() {
     return m;
   }, [snake]);
 
-  const startGame = () => {
+  // Fetch user profile from Firestore when entering the game
+  const fetchUserProfile = useCallback(async (username: string) => {
+    if (!dbEnabled || !db) return;
+    const playerKey = toSafeKey(username);
+    const playerDoc = doc(db, "snake_players", playerKey);
+    try {
+      const snapshot = await getDoc(playerDoc);
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        // Load coins
+        const remoteCoins = Number(data.coins || 0);
+        setCoinBalance(remoteCoins);
+        saveCoinBalance(remoteCoins);
+        // Load best score
+        const remoteBest = Number(data.bestScore || 0);
+        if (remoteBest > 0) {
+          setBestScore(remoteBest);
+          window.localStorage.setItem("snake-best-score", String(remoteBest));
+        }
+        // Load purchased skins
+        if (Array.isArray(data.purchasedSkins) && data.purchasedSkins.length > 0) {
+          setPurchasedSkins(data.purchasedSkins);
+          savePurchasedSkins(data.purchasedSkins);
+        }
+        // Load active skin
+        if (data.activeSkin && typeof data.activeSkin === "string") {
+          setActiveSkinId(data.activeSkin);
+          saveActiveSkin(data.activeSkin);
+        }
+      }
+    } catch (e) {
+      console.warn("fetchUserProfile failed:", e);
+    }
+  }, []);
+
+  const startGame = async () => {
     if (!playerName.trim()) return;
     window.localStorage.setItem("snake-player-name", playerName.trim());
+    await fetchUserProfile(playerName.trim());
     resetGame();
     setScreen("playing");
   };
@@ -534,6 +622,8 @@ export function App() {
     saveCoinBalance(newBalance);
     setPurchasedSkins(newPurchased);
     savePurchasedSkins(newPurchased);
+    // Sync to Firestore
+    syncUserToFirestore({ coins: newBalance, skins: newPurchased });
   };
 
   const selectSkin = (skinId: string) => {
@@ -567,20 +657,20 @@ export function App() {
       const radius = getSegmentRadius(snake, idx, cellPct);
       let eye1Style: React.CSSProperties = {};
       let eye2Style: React.CSSProperties = {};
-      const eyeSize = "18%";
+      const eyeSize = "20%";
 
       if (dir === "right") {
-        eye1Style = { top: "18%", right: "15%", width: eyeSize, height: eyeSize };
-        eye2Style = { bottom: "18%", right: "15%", width: eyeSize, height: eyeSize };
+        eye1Style = { top: "20%", right: "15%", width: eyeSize, height: eyeSize };
+        eye2Style = { bottom: "20%", right: "15%", width: eyeSize, height: eyeSize };
       } else if (dir === "left") {
-        eye1Style = { top: "18%", left: "15%", width: eyeSize, height: eyeSize };
-        eye2Style = { bottom: "18%", left: "15%", width: eyeSize, height: eyeSize };
+        eye1Style = { top: "20%", left: "15%", width: eyeSize, height: eyeSize };
+        eye2Style = { bottom: "20%", left: "15%", width: eyeSize, height: eyeSize };
       } else if (dir === "up") {
-        eye1Style = { top: "15%", left: "18%", width: eyeSize, height: eyeSize };
-        eye2Style = { top: "15%", right: "18%", width: eyeSize, height: eyeSize };
+        eye1Style = { top: "15%", left: "20%", width: eyeSize, height: eyeSize };
+        eye2Style = { top: "15%", right: "20%", width: eyeSize, height: eyeSize };
       } else {
-        eye1Style = { bottom: "15%", left: "18%", width: eyeSize, height: eyeSize };
-        eye2Style = { bottom: "15%", right: "18%", width: eyeSize, height: eyeSize };
+        eye1Style = { bottom: "15%", left: "20%", width: eyeSize, height: eyeSize };
+        eye2Style = { bottom: "15%", right: "20%", width: eyeSize, height: eyeSize };
       }
 
       return (
@@ -657,7 +747,7 @@ export function App() {
       {isRunning && !gameOver && (
         <div className="absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-full bg-[#0d1117]/80 px-2.5 py-0.5 backdrop-blur sm:left-3 sm:top-3 sm:px-3 sm:py-1">
           <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#39ff14] sm:h-2 sm:w-2" />
-          <span className="text-[8px] font-bold uppercase tracking-wider text-[#39ff14] sm:text-[10px]">
+          <span className="text-[20px] font-bold uppercase tracking-wider text-[#39ff14] sm:text-[20px]">
             {difficulty === "hard" ? "HARD" : "EASY"}
           </span>
         </div>
@@ -666,8 +756,8 @@ export function App() {
       {/* Coin balance overlay */}
       {isRunning && !gameOver && (
         <div className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-full bg-[#0d1117]/80 px-2.5 py-0.5 backdrop-blur sm:right-3 sm:top-3 sm:px-3 sm:py-1">
-          <span className="text-[10px] sm:text-xs">🪙</span>
-          <span className="text-[8px] font-bold text-yellow-400 sm:text-[10px]">{coinBalance + score}</span>
+          <span className="text-[20px] sm:text-xl">🪙</span>
+          <span className="text-[20px] font-bold text-yellow-400 sm:text-[20px]">{coinBalance + score}</span>
         </div>
       )}
 
@@ -712,13 +802,13 @@ export function App() {
 
       {gameOver && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/75 backdrop-blur-sm">
-          <p className="text-2xl font-black uppercase tracking-wider text-[#39ff14] drop-shadow-[0_0_10px_rgba(57,255,20,0.5)] sm:text-3xl">Game Over</p>
-          <p className="text-xs font-semibold text-[#39ff14]/70 sm:text-sm">{playerName}</p>
+          <p className="text-4xl font-black uppercase tracking-wider text-[#39ff14] drop-shadow-[0_0_10px_rgba(57,255,20,0.5)] sm:text-4xl">Game Over</p>
+          <p className="text-2xl font-semibold text-[#39ff14]/70 sm:text-2xl">{playerName}</p>
           <p className="text-sm text-white sm:text-lg">Score: {score} | Level: {level}</p>
-          <p className="text-xs text-yellow-400">+{score} coins earned!</p>
+          <p className="text-xl text-yellow-400">+{score} coins earned!</p>
           <button
             onClick={resetGame}
-            className="mt-2 rounded-xl bg-[#39ff14] px-5 py-2 text-xs font-bold text-black transition active:scale-95 sm:px-6 sm:text-sm"
+            className="mt-2 rounded-xl bg-[#39ff14] px-5 py-2 text-xs font-bold text-black transition active:scale-95 sm:px-8 sm:text-lg"
           >
             Play Again
           </button>
@@ -732,7 +822,7 @@ export function App() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-black uppercase tracking-wider text-[#39ff14] sm:text-lg">Top 10 Ranks</h2>
-        <span className="rounded-full bg-[#39ff14]/10 px-2 py-0.5 text-[10px] font-bold text-[#39ff14]">
+        <span className="rounded-full bg-[#39ff14]/10 px-2 py-0.5 text-xs font-bold text-[#39ff14]">
           {dbEnabled ? "LIVE" : "LOCAL"}
         </span>
       </div>
@@ -751,7 +841,7 @@ export function App() {
             >
               <div className="flex items-center gap-2 sm:gap-3">
                 <span className={[
-                  "flex h-6 w-6 items-center justify-center rounded-lg text-[10px] font-black sm:h-7 sm:w-7 sm:text-xs",
+                  "flex h-6 w-6 items-center justify-center rounded-lg text-xs font-black sm:h-7 sm:w-7 sm:text-xs",
                   index === 0 ? "bg-[#39ff14] text-black" : index === 1 ? "bg-gray-600 text-white" : index === 2 ? "bg-amber-700 text-white" : "bg-[#1f2a1f] text-gray-400",
                 ].join(" ")}>
                   {index + 1}
@@ -760,7 +850,7 @@ export function App() {
               </div>
               <div className="text-right">
                 <p className="text-xs font-bold text-[#39ff14] sm:text-sm">{entry.bestScore.toLocaleString()}</p>
-                <p className="text-[9px] text-gray-500 sm:text-[10px]">LVL {entry.level}</p>
+                <p className="text-xs text-gray-500 sm:text-sm">LVL {entry.level}</p>
               </div>
             </li>
           ))}
@@ -775,11 +865,11 @@ export function App() {
       <div className="flex items-center justify-between">
         <h2 className="text-base font-black uppercase tracking-wider text-[#39ff14] sm:text-lg">Skin Shop</h2>
         <div className="flex items-center gap-1.5 rounded-full bg-yellow-500/10 px-3 py-1">
-          <span className="text-sm">🪙</span>
-          <span className="text-sm font-black text-yellow-400">{coinBalance}</span>
+          <span className="text-xl">🪙</span>
+          <span className="text-xl font-black text-yellow-400">{coinBalance}</span>
         </div>
       </div>
-      <p className="text-[10px] text-gray-500">Earn coins by scoring points. Coins are awarded after each game.</p>
+      <p className="text-[20px] text-gray-500">Earn coins by scoring points. Coins are awarded after each game.</p>
       <div className="space-y-2">
         {SNAKE_SKINS.map((skin) => {
           const owned = purchasedSkins.includes(skin.id);
@@ -801,17 +891,17 @@ export function App() {
                   style={{ background: skin.headGradient, boxShadow: `0 0 6px ${skin.glowColor}` }}
                 />
                 <div>
-                  <p className="text-xs font-bold text-white sm:text-sm">{skin.name}</p>
+                  <p className="text font-bold text-white sm:text">{skin.name}</p>
                   {!owned && (
-                    <p className="flex items-center gap-1 text-[10px] text-yellow-400">
+                    <p className="flex items-center gap-1 text-[20px] text-yellow-400">
                       <span>🪙</span> {skin.cost}
                     </p>
                   )}
                   {owned && !isActive && (
-                    <p className="text-[10px] text-gray-500">Owned</p>
+                    <p className="text-[15px] text-gray-500">Owned</p>
                   )}
                   {isActive && (
-                    <p className="text-[10px] font-bold text-[#39ff14]">Equipped</p>
+                    <p className="text-[15px] font-bold text-[#39ff14]">Equipped</p>
                   )}
                 </div>
               </div>
@@ -820,19 +910,19 @@ export function App() {
                 <button
                   onClick={() => buySkin(skin.id)}
                   disabled={!canAfford}
-                  className="rounded-lg bg-yellow-500 px-3 py-1.5 text-[10px] font-bold text-black transition active:scale-95 disabled:opacity-30 sm:text-xs"
+                  className="rounded-lg bg-yellow-500 px-3 py-1.5 text-[15px] font-bold text-black transition active:scale-95 disabled:opacity-30 sm:text"
                 >
                   Buy
                 </button>
               ) : !isActive ? (
                 <button
                   onClick={() => selectSkin(skin.id)}
-                  className="rounded-lg border border-[#39ff14]/30 px-3 py-1.5 text-[10px] font-bold text-[#39ff14] transition active:scale-95 sm:text-xs"
+                  className="rounded-lg border border-[#39ff14]/30 px-3 py-1.5 text-[15px] font-bold text-[#39ff14] transition active:scale-95 sm:text"
                 >
                   Equip
                 </button>
               ) : (
-                <span className="rounded-lg bg-[#39ff14]/20 px-3 py-1.5 text-[10px] font-bold text-[#39ff14] sm:text-xs">Active</span>
+                <span className="rounded-lg bg-[#39ff14]/20 px-3 py-1.5 text-xs font-bold text-[#39ff14] sm:text-xs">Active</span>
               )}
             </div>
           );
@@ -864,19 +954,19 @@ export function App() {
             <h1 className="text-2xl font-black uppercase italic tracking-wider text-[#39ff14] drop-shadow-[0_0_10px_rgba(57,255,20,0.4)] sm:text-3xl">
               Snake Game 360
             </h1>
-            <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-gray-500 sm:text-xs">Arcade Snake</p>
+            <p className="mt-1 text-xs uppercase tracking-[0.25em] text-gray-500 sm:text-xs">Arcade Snake</p>
           </div>
 
           {/* Coin balance */}
           <div className="flex items-center gap-2 rounded-full bg-yellow-500/10 px-4 py-1.5">
             <span className="text-base">🪙</span>
             <span className="text-base font-black text-yellow-400">{coinBalance}</span>
-            <span className="text-[10px] text-gray-500">coins</span>
+            <span className="text-xs text-gray-500">coins</span>
           </div>
 
           <div className="w-full space-y-2">
-            <label htmlFor="player-name" className="block text-[10px] font-bold uppercase tracking-wider text-gray-400 sm:text-xs">
-              Player Name
+            <label htmlFor="player-name" className="block text-xs font-bold uppercase tracking-wider text-gray-400 sm:text-xs">
+              Username
             </label>
             <input
               ref={nameInputRef}
@@ -886,7 +976,7 @@ export function App() {
               value={playerName}
               onChange={(e) => setPlayerName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") startGame(); }}
-              placeholder="Enter your name..."
+              placeholder="Enter username..."
               autoFocus
               className="w-full rounded-xl border border-[#39ff14]/20 bg-[#0a0f0a] px-4 py-2.5 text-base font-bold text-[#39ff14] outline-none transition placeholder:text-gray-600 focus:border-[#39ff14]/50 focus:shadow-[0_0_15px_rgba(57,255,20,0.1)] sm:py-3 sm:text-lg"
             />
@@ -894,7 +984,7 @@ export function App() {
 
           {/* Difficulty selection */}
           <div className="w-full space-y-2">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 sm:text-xs">Difficulty</p>
+            <p className="text-xs font-bold uppercase tracking-wider text-gray-400 sm:text-xs">Difficulty</p>
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => setDifficulty("easy")}
@@ -919,7 +1009,7 @@ export function App() {
                 Hard
               </button>
             </div>
-            <p className="text-center text-[9px] text-gray-600">
+            <p className="text-center text-xs text-gray-600">
               {difficulty === "easy" ? "Normal speed, no obstacles" : "Faster speed + obstacles that increase each level"}
             </p>
           </div>
@@ -943,11 +1033,11 @@ export function App() {
           <div className="grid w-full grid-cols-2 gap-3 text-center">
             <div className="rounded-xl border border-[#39ff14]/10 bg-[#0a0f0a] px-3 py-2.5">
               <p className="text-base font-black text-[#39ff14] sm:text-lg">20</p>
-              <p className="text-[9px] uppercase tracking-wider text-gray-500 sm:text-[10px]">Levels</p>
+              <p className="text-xs uppercase tracking-wider text-gray-500 sm:text-sm">Levels</p>
             </div>
             <div className="rounded-xl border border-[#39ff14]/10 bg-[#0a0f0a] px-3 py-2.5">
               <p className="text-base font-black text-[#39ff14] sm:text-lg">{bestScore.toLocaleString()}</p>
-              <p className="text-[9px] uppercase tracking-wider text-gray-500 sm:text-[10px]">Best Score</p>
+              <p className="text-xs uppercase tracking-wider text-gray-500 sm:text-sm">Best Score</p>
             </div>
           </div>
         </div>
@@ -995,7 +1085,7 @@ export function App() {
         </h1>
         <button
           onClick={() => setSolidWalls((w) => !w)}
-          className={["flex h-8 w-8 items-center justify-center rounded-lg text-[10px] font-bold transition sm:h-9 sm:w-9 sm:text-xs", solidWalls ? "text-[#39ff14]" : "text-gray-500"].join(" ")}
+          className={["flex h-8 w-8 items-center justify-center rounded-lg text-xs font-bold transition sm:h-9 sm:w-9 sm:text-xs", solidWalls ? "text-[#39ff14]" : "text-gray-500"].join(" ")}
           title={solidWalls ? "Solid walls ON" : "Wrap-around"}
         >
           Wall
@@ -1015,27 +1105,27 @@ export function App() {
           <div className="flex items-center justify-between rounded-xl bg-[#1a1f1a] px-4 py-2">
             <div className="flex items-center gap-2">
               <span className="text-sm font-bold text-white">{playerName}</span>
-              {difficulty === "hard" && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[8px] font-bold text-red-400">HARD</span>}
+              {difficulty === "hard" && <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[11px] font-bold text-red-400">HARD</span>}
             </div>
             <div className="flex items-center gap-2">
-              {boosting && <span className="animate-pulse rounded-full bg-orange-500/20 px-2 py-0.5 text-[9px] font-bold text-orange-400">BOOST</span>}
+              {boosting && <span className="animate-pulse rounded-full bg-orange-500/20 px-2 py-0.5 text-xs font-bold text-orange-400">BOOST</span>}
               <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-0.5">
-                <span className="text-[10px]">🪙</span>
-                <span className="text-[10px] font-bold text-yellow-400">{coinBalance}</span>
+                <span className="text-xs">🪙</span>
+                <span className="text-xs font-bold text-yellow-400">{coinBalance}</span>
               </div>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl bg-[#1a1f1a] px-4 py-3">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Score</p>
+              <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Score</p>
               <p className="text-2xl font-black text-[#39ff14] drop-shadow-[0_0_6px_rgba(57,255,20,0.3)]">{score.toLocaleString()}</p>
             </div>
             <div className="rounded-xl bg-[#1a1f1a] px-4 py-3">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Level</p>
+              <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Level</p>
               <div className="flex items-end justify-between">
                 <p className="text-2xl font-black text-cyan-400">{String(level).padStart(2, "0")}</p>
-                <span className="text-[9px] font-bold uppercase text-cyan-400/60">{levelTitle(level)}</span>
+                <span className="text-xs font-bold uppercase text-cyan-400/60">{levelTitle(level)}</span>
               </div>
             </div>
           </div>
@@ -1045,7 +1135,7 @@ export function App() {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 text-orange-400"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
               </div>
               <div>
-                <p className="text-[9px] font-bold uppercase tracking-wider text-gray-500">Speed</p>
+                <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Speed</p>
                 <p className="text-base font-black text-orange-400">{Math.round((1000 / speed) * 10) / 10}x</p>
               </div>
             </div>
@@ -1054,18 +1144,18 @@ export function App() {
                 <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4 text-[#39ff14]"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
               </div>
               <div>
-                <p className="text-[9px] font-bold uppercase tracking-wider text-gray-500">Best</p>
+                <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Best</p>
                 <p className="text-base font-black text-[#39ff14]">{bestScore.toLocaleString()}</p>
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-2 px-0.5">
-            <span className="text-[10px] font-bold text-gray-500">LVL {level}</span>
+            <span className="text-xs font-bold text-gray-500">LVL {level}</span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#1a1f1a]">
               <div className="h-full rounded-full bg-gradient-to-r from-[#39ff14] to-[#70e000] transition-all duration-300" style={{ width: level >= MAX_LEVEL ? "100%" : `${(applesInLevel / APPLES_PER_LEVEL) * 100}%` }} />
             </div>
-            <span className="text-[10px] font-bold text-gray-500">{level >= MAX_LEVEL ? "MAX" : `LVL ${level + 1}`}</span>
+            <span className="text-xs font-bold text-gray-500">{level >= MAX_LEVEL ? "MAX" : `LVL ${level + 1}`}</span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -1083,7 +1173,7 @@ export function App() {
             </button>
           </div>
 
-          <p className="text-center text-[10px] text-gray-600">Arrow keys / WASD to move, hold to boost, Space to pause</p>
+          <p className="text-center text-xs text-gray-600">Arrow keys / WASD to move, hold to boost, Space to pause</p>
 
           {leaderboardPanel}
         </aside>
@@ -1095,7 +1185,7 @@ export function App() {
           <>
             <div className="grid grid-cols-2 gap-2 sm:gap-3">
               <div className="rounded-xl bg-[#1a1f1a] px-3 py-2 sm:rounded-2xl sm:px-4 sm:py-3">
-                <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[10px]">Current Score</p>
+                <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 sm:text-sm">Current Score</p>
                 <div className="flex items-end justify-between">
                   <p className="text-xl font-black text-[#39ff14] drop-shadow-[0_0_6px_rgba(57,255,20,0.3)] sm:text-3xl">
                     {score.toLocaleString()}
@@ -1104,10 +1194,10 @@ export function App() {
                 </div>
               </div>
               <div className="rounded-xl bg-[#1a1f1a] px-3 py-2 sm:rounded-2xl sm:px-4 sm:py-3">
-                <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[10px]">Level</p>
+                <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 sm:text-sm">Level</p>
                 <div className="flex items-end justify-between">
                   <p className="text-xl font-black text-cyan-400 sm:text-3xl">{String(level).padStart(2, "0")}</p>
-                  <span className="text-[8px] font-bold uppercase text-cyan-400/60 sm:text-[10px]">{levelTitle(level)}</span>
+                  <span className="text-[11px] font-bold uppercase text-cyan-400/60 sm:text-sm">{levelTitle(level)}</span>
                 </div>
               </div>
             </div>
@@ -1118,7 +1208,7 @@ export function App() {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5 text-orange-400 sm:h-4 sm:w-4"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 </div>
                 <div>
-                  <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[9px]">Speed</p>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 sm:text-sm">Speed</p>
                   <p className="text-sm font-black text-orange-400 sm:text-base">{Math.round((1000 / speed) * 10) / 10}x</p>
                 </div>
               </div>
@@ -1127,28 +1217,28 @@ export function App() {
                   <span className="text-sm">🪙</span>
                 </div>
                 <div>
-                  <p className="text-[8px] font-bold uppercase tracking-wider text-gray-500 sm:text-[9px]">Coins</p>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 sm:text-sm">Coins</p>
                   <p className="text-sm font-black text-yellow-400 sm:text-base">{coinBalance}</p>
                 </div>
               </div>
             </div>
 
             <div className="flex items-center gap-2 px-0.5">
-              <span className="text-[8px] font-bold text-gray-500 sm:text-[10px]">LVL {level}</span>
+              <span className="text-[11px] font-bold text-gray-500 sm:text-sm">LVL {level}</span>
               <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#1a1f1a] sm:h-1.5">
                 <div
                   className="h-full rounded-full bg-gradient-to-r from-[#39ff14] to-[#70e000] transition-all duration-300"
                   style={{ width: level >= MAX_LEVEL ? "100%" : `${(applesInLevel / APPLES_PER_LEVEL) * 100}%` }}
                 />
               </div>
-              <span className="text-[8px] font-bold text-gray-500 sm:text-[10px]">
+              <span className="text-[11px] font-bold text-gray-500 sm:text-sm">
                 {level >= MAX_LEVEL ? "MAX" : `LVL ${level + 1}`}
               </span>
             </div>
 
             {boosting && (
               <div className="flex items-center justify-center">
-                <span className="animate-pulse rounded-full bg-orange-500/20 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-orange-400">Boost Active</span>
+                <span className="animate-pulse rounded-full bg-orange-500/20 px-3 py-1 text-xs font-bold uppercase tracking-wider text-orange-400">Boost Active</span>
               </div>
             )}
 
@@ -1193,7 +1283,7 @@ export function App() {
           ) : (
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5 sm:h-6 sm:w-6"><path d="M21 6H3a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zM7 15H5v-2H7v2zm0-4H5V9H7v2zm4 0H9V9h2v2zm8 4h-2v-2h2v2zm0-4h-2V9h2v2z"/></svg>
           )}
-          <span className="text-[9px] font-bold uppercase sm:text-[10px]">Play</span>
+          <span className="text-xs font-bold uppercase sm:text-sm">Play</span>
         </button>
 
         <button
@@ -1207,7 +1297,7 @@ export function App() {
           ) : (
             <span className="text-xl sm:text-2xl">🐍</span>
           )}
-          <span className="text-[9px] font-bold uppercase sm:text-[10px]">Skins</span>
+          <span className="text-xs font-bold uppercase sm:text-sm">Skins</span>
         </button>
 
         <button
@@ -1221,7 +1311,7 @@ export function App() {
           ) : (
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5 sm:h-6 sm:w-6"><path d="M3 3v18h18M9 17V9m4 8V5m4 12v-4"/></svg>
           )}
-          <span className="text-[9px] font-bold uppercase sm:text-[10px]">Ranks</span>
+          <span className="text-xs font-bold uppercase sm:text-sm">Ranks</span>
         </button>
       </nav>
     </main>

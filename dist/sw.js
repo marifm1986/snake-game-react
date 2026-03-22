@@ -1,4 +1,4 @@
-const CACHE_NAME = "snake-v1774184136874";
+const CACHE_NAME = "snake-v1774189151503";
 const ASSETS = ["/", "/index.html"];
 
 self.addEventListener("install", (event) => {
