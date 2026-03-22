@@ -290,6 +290,7 @@ export function App() {
   const [obstacles, setObstacles] = useState<Point[]>([]);
   const [bonusApple, setBonusApple] = useState<Point | null>(null);
   const bonusTimerRef = useRef<number | null>(null);
+  const [bonusCelebration, setBonusCelebration] = useState<Point | null>(null);
   const [direction, setDirection] = useState<Direction>("right");
   const [isRunning, setIsRunning] = useState(false);
   const [gameOver, setGameOver] = useState(false);
@@ -576,6 +577,7 @@ export function App() {
     setBoosting(false);
     boostingRef.current = false;
     setBonusApple(null);
+    setBonusCelebration(null);
     if (bonusTimerRef.current) { clearTimeout(bonusTimerRef.current); bonusTimerRef.current = null; }
     // Generate initial obstacles for hard mode (level 0 = none)
     setObstacles([]);
@@ -696,11 +698,13 @@ export function App() {
         if (!ateFood) nextSnake.pop();
         if (nextSnake.slice(1).some((s) => s.x === nextHead.x && s.y === nextHead.y)) { setGameOver(true); setIsRunning(false); return currentSnake; }
         if (ateFood) { setScore((v) => v + 1); setFood(randomFood(new Set([...nextSnake.map(toKey), ...obstacles.map(toKey)]))); }
-        // Bonus apple collision — +10 coins instantly
+        // Bonus apple collision — +10 coins instantly + celebration
         setBonusApple((currentBonus) => {
           if (currentBonus && nextHead.x === currentBonus.x && nextHead.y === currentBonus.y) {
             setCoinBalance((c) => { const nb = c + 10; saveCoinBalance(nb); return nb; });
             if (bonusTimerRef.current) { clearTimeout(bonusTimerRef.current); bonusTimerRef.current = null; }
+            setBonusCelebration({ x: currentBonus.x, y: currentBonus.y });
+            setTimeout(() => setBonusCelebration(null), 2000);
             return null;
           }
           return currentBonus;
@@ -965,6 +969,15 @@ export function App() {
           );
         })}
       </div>
+
+      {bonusCelebration && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+          <div className="animate-bounce text-center">
+            <span className="text-5xl drop-shadow-[0_0_12px_rgba(255,215,0,0.8)] sm:text-6xl">😄</span>
+            <p className="mt-1 text-sm font-black text-yellow-300 drop-shadow-[0_0_6px_rgba(0,0,0,0.8)] sm:text-base">+10 Coins!</p>
+          </div>
+        </div>
+      )}
 
       {gameOver && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/75 backdrop-blur-sm">
