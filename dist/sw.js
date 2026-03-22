@@ -1,11 +1,11 @@
-const CACHE_NAME = "snake-v1";
+const CACHE_NAME = "snake-v1774177211694";
 const ASSETS = ["/", "/index.html"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
   );
-  self.skipWaiting();
+  // Don't skipWaiting automatically — let the app control when to activate
 });
 
 self.addEventListener("activate", (event) => {
@@ -21,4 +21,11 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     caches.match(event.request).then((cached) => cached || fetch(event.request))
   );
+});
+
+// Listen for message from the app to skip waiting
+self.addEventListener("message", (event) => {
+  if (event.data === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
