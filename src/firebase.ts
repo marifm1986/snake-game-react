@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, Firestore } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentSingleTabManager, Firestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -22,9 +22,14 @@ let dbEnabled = false;
 if (hasMinConfig) {
   try {
     const app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
+    // Enable IndexedDB persistence so Firestore works offline
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentSingleTabManager({ forceOwnership: true }),
+      }),
+    });
     dbEnabled = true;
-    console.log("Firestore initialized");
+    console.log("Firestore initialized with offline persistence");
   } catch (error) {
     console.warn("Firestore init failed:", error);
     db = null;
