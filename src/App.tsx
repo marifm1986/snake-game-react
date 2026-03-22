@@ -500,7 +500,7 @@ export function App() {
         style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)`, gridTemplateRows: `repeat(${GRID_SIZE}, 1fr)` }}
       >
         {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
-          const x = index % GRID_SIZE + 1;
+          const x = index % GRID_SIZE;
           const y = Math.floor(index / GRID_SIZE);
           const key = `${x}:${y}`;
           const isSnake = snakeMap.has(key);
