@@ -288,6 +288,8 @@ export function App() {
   const [snake, setSnake] = useState<Point[]>(START_SNAKE);
   const [food, setFood] = useState<Point>(() => randomFood(new Set(START_SNAKE.map(toKey))));
   const [obstacles, setObstacles] = useState<Point[]>([]);
+  const [bonusApple, setBonusApple] = useState<Point | null>(null);
+  const bonusTimerRef = useRef<number | null>(null);
   const [direction, setDirection] = useState<Direction>("right");
   const [isRunning, setIsRunning] = useState(false);
   const [gameOver, setGameOver] = useState(false);
@@ -573,6 +575,8 @@ export function App() {
     setIsRunning(false);
     setBoosting(false);
     boostingRef.current = false;
+    setBonusApple(null);
+    if (bonusTimerRef.current) { clearTimeout(bonusTimerRef.current); bonusTimerRef.current = null; }
     // Generate initial obstacles for hard mode (level 0 = none)
     setObstacles([]);
   }, []);
@@ -642,6 +646,37 @@ export function App() {
     return () => document.body.removeEventListener("touchmove", preventScroll);
   }, []);
 
+  // ─── Bonus apple spawner (appears every 15-30s, lasts 5s) ───
+  useEffect(() => {
+    if (!isRunning || gameOver) {
+      setBonusApple(null);
+      if (bonusTimerRef.current) { clearTimeout(bonusTimerRef.current); bonusTimerRef.current = null; }
+      return;
+    }
+    const scheduleNext = () => {
+      const delay = (15 + Math.random() * 15) * 1000;
+      return window.setTimeout(() => {
+        // Spawn bonus apple at random position not occupied
+        const excluded = new Set([...snake.map(toKey), toKey(food), ...obstacles.map(toKey)]);
+        const pos = randomFood(excluded);
+        setBonusApple(pos);
+        // Auto-remove after 5 seconds
+        const removeTimer = window.setTimeout(() => {
+          setBonusApple(null);
+          // Schedule next bonus
+          bonusTimerRef.current = scheduleNext();
+        }, 5000);
+        bonusTimerRef.current = removeTimer;
+      }, delay);
+    };
+    bonusTimerRef.current = scheduleNext();
+    return () => {
+      if (bonusTimerRef.current) { clearTimeout(bonusTimerRef.current); bonusTimerRef.current = null; }
+    };
+    // Only re-run when game starts/stops, not on every snake move
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning, gameOver]);
+
   // ─── Game tick ───
   useEffect(() => {
     if (!isRunning || gameOver) return;
@@ -661,6 +696,15 @@ export function App() {
         if (!ateFood) nextSnake.pop();
         if (nextSnake.slice(1).some((s) => s.x === nextHead.x && s.y === nextHead.y)) { setGameOver(true); setIsRunning(false); return currentSnake; }
         if (ateFood) { setScore((v) => v + 1); setFood(randomFood(new Set([...nextSnake.map(toKey), ...obstacles.map(toKey)]))); }
+        // Bonus apple collision — +10 coins instantly
+        setBonusApple((currentBonus) => {
+          if (currentBonus && nextHead.x === currentBonus.x && nextHead.y === currentBonus.y) {
+            setCoinBalance((c) => { const nb = c + 10; saveCoinBalance(nb); return nb; });
+            if (bonusTimerRef.current) { clearTimeout(bonusTimerRef.current); bonusTimerRef.current = null; }
+            return null;
+          }
+          return currentBonus;
+        });
         return nextSnake;
       });
     }, speed);
@@ -884,12 +928,21 @@ export function App() {
           const key = `${x}:${y}`;
           const isSnake = snakeMap.has(key);
           const isFood = food.x === x && food.y === y;
+          const isBonus = bonusApple !== null && bonusApple.x === x && bonusApple.y === y;
           const isObstacle = obstacleSet.has(key);
 
           return (
             <div key={key} className="flex items-center justify-center">
               {isSnake ? (
                 renderSnakeCell(x, y)
+              ) : isBonus ? (
+                <div
+                  className="animate-bounce flex items-center justify-center"
+                  style={{ width: "100%", height: "100%", fontSize: "min(5.5vw, 2rem)", lineHeight: 1 }}
+                >
+                  <span style={{ filter: "drop-shadow(0 0 8px rgba(255,215,0,0.8)) drop-shadow(0 0 16px rgba(255,215,0,0.4))" }}>🍎</span>
+                  <span className="absolute text-[7px] font-black text-yellow-300 sm:text-[9px]" style={{ bottom: "0%", textShadow: "0 0 4px rgba(0,0,0,0.8)" }}>+10</span>
+                </div>
               ) : isFood ? (
                 <div className="flex items-center justify-center" style={{ width: "95%", height: "95%", fontSize: "min(4.5vw, 1.5rem)", lineHeight: 1 }}>
                   <span style={{ filter: "drop-shadow(0 0 4px rgba(255,0,0,0.5))" }}>🍎</span>
