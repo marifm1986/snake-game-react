@@ -1,11 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ref, get, set, query, orderByChild, limitToLast } from "firebase/database";
+import { db, dbEnabled } from "./firebase";
 
 type Point = { x: number; y: number };
 type Direction = "up" | "down" | "left" | "right";
 
+type LeaderboardEntry = {
+  id: string;
+  name: string;
+  bestScore: number;
+  level: number;
+  updatedAt: string;
+};
+
 const GRID_SIZE = 20;
 const MAX_LEVEL = 20;
 const APPLES_PER_LEVEL = 5;
+const LOCAL_LEADERBOARD_KEY = "snake-local-leaderboard";
 
 // Level 0 = 200ms, Level 20 = 60ms (gradually harder)
 function speedForLevel(level: number) {
@@ -49,6 +60,10 @@ function randomFood(excluded: Set<string>) {
 
 const SWIPE_THRESHOLD = 20;
 
+function toSafeKey(name: string) {
+  return name.toLowerCase().replace(/[.#$\[\]/]/g, "_");
+}
+
 type GameScreen = "name" | "playing";
 
 export function App() {
@@ -70,6 +85,8 @@ export function App() {
   const [bestScore, setBestScore] = useState(0);
   const [solidWalls, setSolidWalls] = useState(true);
   const [levelUpFlash, setLevelUpFlash] = useState(false);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [leaderboardError, setLeaderboardError] = useState<string | null>(null);
 
   const directionRef = useRef<Direction>("right");
   const pendingDirectionRef = useRef<Direction>("right");
@@ -83,6 +100,150 @@ export function App() {
       setBestScore(Number(storedBest) || 0);
     }
   }, []);
+
+  const loadLocalLeaderboard = () => {
+    const raw = window.localStorage.getItem(LOCAL_LEADERBOARD_KEY);
+    if (!raw) return [] as LeaderboardEntry[];
+    try {
+      const parsed = JSON.parse(raw) as LeaderboardEntry[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const persistLocalLeaderboard = (entries: LeaderboardEntry[]) => {
+    window.localStorage.setItem(LOCAL_LEADERBOARD_KEY, JSON.stringify(entries));
+  };
+
+  const fetchLeaderboard = useCallback(async () => {
+    try {
+      let entries: LeaderboardEntry[] = [];
+
+      if (dbEnabled && db) {
+        const leaderboardRef = query(
+          ref(db, "snake_players"),
+          orderByChild("bestScore"),
+          limitToLast(10)
+        );
+        const snapshot = await get(leaderboardRef);
+
+        if (snapshot.exists()) {
+          const data = snapshot.val() as Record<string, any>;
+          entries = Object.entries(data)
+            .map(([key, val]) => ({
+              id: key,
+              name: String(val.name || "Unnamed"),
+              bestScore: Number(val.bestScore || 0),
+              level: Number(val.level || 0),
+              updatedAt: String(val.updatedAt || ""),
+            }))
+            .sort((a, b) => b.bestScore - a.bestScore);
+        }
+      } else {
+        entries = loadLocalLeaderboard();
+      }
+
+      setLeaderboard(entries);
+      setLeaderboardError(null);
+    } catch (error) {
+      console.error("Fetch leaderboard failed:", error);
+      setLeaderboardError("Unable to fetch leaderboard.");
+      setLeaderboard(loadLocalLeaderboard());
+    }
+  }, []);
+
+  const updateLocalLeaderboard = (name: string, scoreValue: number, levelValue: number) => {
+    const list = loadLocalLeaderboard();
+    const normalized = name.trim();
+
+    const existing = list.find((item) => item.name.toLowerCase() === normalized.toLowerCase());
+
+    if (existing) {
+      if (scoreValue > existing.bestScore) {
+        existing.bestScore = scoreValue;
+      }
+      existing.level = levelValue;
+      existing.updatedAt = new Date().toISOString();
+    } else {
+      list.push({
+        id: crypto.randomUUID(),
+        name: normalized,
+        bestScore: scoreValue,
+        level: levelValue,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const sorted = list
+      .sort((a, b) => b.bestScore - a.bestScore || (a.updatedAt < b.updatedAt ? 1 : -1))
+      .slice(0, 10);
+    persistLocalLeaderboard(sorted);
+    setLeaderboard(sorted);
+  };
+
+  const submitScore = useCallback(
+    async (scoreValue: number, levelValue: number) => {
+      const normalized = playerName.trim();
+      if (!normalized) return;
+
+      if (dbEnabled && db) {
+        const playerKey = toSafeKey(normalized);
+        const playerRef = ref(db, `snake_players/${playerKey}`);
+        const snapshot = await get(playerRef);
+
+        const now = new Date().toISOString();
+
+        if (!snapshot.exists()) {
+          await set(playerRef, {
+            name: normalized,
+            bestScore: scoreValue,
+            level: levelValue,
+            lastScore: scoreValue,
+            updatedAt: now,
+          });
+        } else {
+          const data = snapshot.val();
+          const previousBest = Number(data.bestScore || 0);
+          if (scoreValue > previousBest) {
+            await set(playerRef, {
+              ...data,
+              name: normalized,
+              bestScore: scoreValue,
+              level: levelValue,
+              lastScore: scoreValue,
+              updatedAt: now,
+            });
+          } else {
+            await set(playerRef, {
+              ...data,
+              lastScore: scoreValue,
+              level: levelValue,
+              updatedAt: now,
+            });
+          }
+        }
+
+        await fetchLeaderboard();
+      } else {
+        updateLocalLeaderboard(normalized, scoreValue, levelValue);
+      }
+    },
+    [fetchLeaderboard, playerName]
+  );
+
+  useEffect(() => {
+    fetchLeaderboard();
+  }, [fetchLeaderboard]);
+
+  useEffect(() => {
+    if (gameOver) {
+      submitScore(score, level).catch((error) => {
+        console.error("submitScore failed:", error);
+        setLeaderboardError("Could not update leaderboard.");
+      });
+    }
+  }, [gameOver, score, level, submitScore]);
 
   useEffect(() => {
     directionRef.current = direction;
@@ -102,8 +263,6 @@ export function App() {
     if (newLevel !== level) {
       setLevel(newLevel);
       setLevelUpFlash(true);
-      // const timeout = setTimeout(() => setLevelUpFlash(false), 3000);
-      
       setTimeout(() => {
         setLevelUpFlash(false);
       }, 3000);
@@ -383,16 +542,6 @@ export function App() {
     <main className="relative flex min-h-[100dvh] flex-col overflow-hidden bg-[radial-gradient(circle_at_top,_#fdf2e9,_#ffd7a8_45%,_#f4a261_100%)] px-2 py-4 text-stone-900 sm:px-4 sm:py-8 md:px-8">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.15)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.15)_1px,transparent_1px)] bg-[size:38px_38px] opacity-30" />
 
-      {/* Level up flash overlay */}
-      {/* {levelUpFlash && (
-        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center">
-          <div className="animate-bounce rounded-2xl bg-amber-500/90 px-8 py-4 text-center shadow-2xl">
-            <p className="text-2xl font-black uppercase text-white sm:text-4xl">Level {level}!</p>
-            <p className="text-sm font-semibold text-amber-100">Speed increased</p>
-          </div>
-        </div>
-      )} */}
-
       <section className="relative mx-auto flex w-full max-w-5xl flex-1 flex-col gap-3 rounded-2xl border border-amber-100/70 bg-[#fff7ec]/85 p-3 shadow-[0_18px_60px_rgba(134,71,26,0.2)] backdrop-blur sm:gap-6 sm:rounded-3xl sm:p-5 md:p-8">
         {/* Header */}
         <header className="flex flex-wrap items-end justify-between gap-2 sm:gap-3">
@@ -567,6 +716,31 @@ export function App() {
               </p>
               <p>Level up every {APPLES_PER_LEVEL} apples ({MAX_LEVEL} levels total).</p>
               <p className="mt-1 hidden text-stone-400 sm:block">Keyboard: Arrow keys / WASD, Space to pause.</p>
+            </div>
+
+            {/* Leaderboard */}
+            <div className="rounded-xl border border-sky-400/40 bg-white/90 p-3 text-xs text-stone-600 sm:rounded-2xl sm:p-4 sm:text-xs">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="text-sm font-bold uppercase tracking-wide text-sky-700">Top 10 Leaderboard</h2>
+                <span className="text-[10px] text-sky-500">{dbEnabled ? "Cloud" : "Local"}</span>
+              </div>
+
+              {leaderboardError && (
+                <p className="text-red-500">{leaderboardError}</p>
+              )}
+
+              {leaderboard.length === 0 ? (
+                <p className="text-stone-400">No scores yet. Play to submit!</p>
+              ) : (
+                <ol className="space-y-1">
+                  {leaderboard.map((entry, index) => (
+                    <li key={entry.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-2 py-1">
+                      <span className="text-[11px] font-semibold text-slate-700">{index + 1}. {entry.name}</span>
+                      <span className="text-[10px] text-slate-500">{entry.bestScore} (L{entry.level})</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
             </div>
           </aside>
         </div>
