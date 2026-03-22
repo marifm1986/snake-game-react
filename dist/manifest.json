@@ -1,13 +1,25 @@
 {
-  "name": "Snake Arcade Classic",
-  "short_name": "Snake",
-  "description": "Classic Snake arcade game - eat, grow, survive!",
+  "name": "Snake Game 360 - Arcade Snake",
+  "short_name": "Snake 360",
+  "description": "A modern neon-themed arcade snake game with global leaderboards, unlockable skins, Easy & Hard modes. Free to play on any device!",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#fdf2e9",
-  "theme_color": "#f4a261",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "categories": ["games", "entertainment"],
   "icons": [
+    {
+      "src": "/icons/favicon-16x16.png",
+      "sizes": "16x16",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
     {
       "src": "/icons/icon-192.png",
       "sizes": "192x192",
@@ -19,6 +31,11 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
     }
   ]
 }

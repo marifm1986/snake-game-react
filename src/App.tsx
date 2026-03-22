@@ -87,6 +87,46 @@ const LOCAL_LEADERBOARD_KEY = "snake-local-leaderboard";
 const COIN_BALANCE_KEY = "snake-coin-balance";
 const PURCHASED_SKINS_KEY = "snake-purchased-skins";
 const ACTIVE_SKIN_KEY = "snake-active-skin";
+const PENDING_SYNC_KEY = "snake-pending-sync";
+
+// ─── Offline pending sync queue ───
+type PendingSync = {
+  playerName: string;
+  score: number;
+  level: number;
+  coins: number;
+  purchasedSkins: string[];
+  activeSkin: string;
+  timestamp: string;
+};
+
+function loadPendingSync(): PendingSync[] {
+  const raw = window.localStorage.getItem(PENDING_SYNC_KEY);
+  if (!raw) return [];
+  try { const arr = JSON.parse(raw); return Array.isArray(arr) ? arr : []; }
+  catch { return []; }
+}
+
+function savePendingSync(queue: PendingSync[]) {
+  window.localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(queue));
+}
+
+function addPendingSync(entry: PendingSync) {
+  const queue = loadPendingSync();
+  // Merge with existing entry for same player: keep highest score & latest coins
+  const idx = queue.findIndex((q) => q.playerName.toLowerCase() === entry.playerName.toLowerCase());
+  if (idx >= 0) {
+    const existing = queue[idx];
+    queue[idx] = {
+      ...entry,
+      score: Math.max(existing.score, entry.score),
+      coins: entry.coins,
+    };
+  } else {
+    queue.push(entry);
+  }
+  savePendingSync(queue);
+}
 
 function speedForLevel(level: number, difficulty: GameDifficulty) {
   if (difficulty === "hard") {
@@ -234,6 +274,9 @@ export function App() {
 
   // ─── Difficulty ───
   const [difficulty, setDifficulty] = useState<GameDifficulty>("easy");
+
+  // ─── Online / Offline state ───
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   // ─── Snake Skin Shop ───
   const [coinBalance, setCoinBalance] = useState(loadCoinBalance);
@@ -414,16 +457,80 @@ export function App() {
 
   useEffect(() => { fetchLeaderboard(); }, [fetchLeaderboard]);
 
-  // Award coins + submit score on game over
+  // ─── Flush pending offline sync queue ───
+  const flushPendingSync = useCallback(async () => {
+    if (!dbEnabled || !db) return;
+    const queue = loadPendingSync();
+    if (queue.length === 0) return;
+    const remaining: PendingSync[] = [];
+    for (const entry of queue) {
+      try {
+        const playerKey = toSafeKey(entry.playerName);
+        const playerDoc = doc(db, "snake_players", playerKey);
+        const snapshot = await getDoc(playerDoc);
+        const now = entry.timestamp;
+        if (!snapshot.exists()) {
+          await setDoc(playerDoc, { name: entry.playerName, bestScore: entry.score, level: entry.level, lastScore: entry.score, coins: entry.coins, purchasedSkins: entry.purchasedSkins, activeSkin: entry.activeSkin, updatedAt: now });
+        } else {
+          const data = snapshot.data();
+          const previousBest = Number(data.bestScore || 0);
+          const updates: Record<string, unknown> = { lastScore: entry.score, level: entry.level, coins: entry.coins, purchasedSkins: entry.purchasedSkins, activeSkin: entry.activeSkin, updatedAt: now };
+          if (entry.score > previousBest) updates.bestScore = entry.score;
+          await setDoc(playerDoc, { ...data, name: entry.playerName, ...updates });
+        }
+      } catch {
+        remaining.push(entry);
+      }
+    }
+    savePendingSync(remaining);
+    if (remaining.length < queue.length) {
+      try { await fetchLeaderboard(); } catch {}
+    }
+  }, [fetchLeaderboard]);
+
+  // Online/offline event listeners
+  useEffect(() => {
+    const goOnline = () => {
+      setIsOnline(true);
+      flushPendingSync();
+    };
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    if (navigator.onLine) flushPendingSync();
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, [flushPendingSync]);
+
+  // Award coins + submit score on game over (queue offline if no connection)
   useEffect(() => {
     if (gameOver && score > 0) {
       const newBalance = coinBalance + score;
       setCoinBalance(newBalance);
       saveCoinBalance(newBalance);
-      submitScore(score, level, newBalance).catch((error) => {
-        console.error("submitScore failed:", error);
-        setLeaderboardError("Could not update leaderboard.");
-      });
+
+      if (navigator.onLine && dbEnabled && db) {
+        submitScore(score, level, newBalance).catch(() => {
+          // Network failed mid-request — queue for later
+          addPendingSync({
+            playerName: playerName.trim(),
+            score, level, coins: newBalance,
+            purchasedSkins, activeSkin: activeSkinId,
+            timestamp: new Date().toISOString(),
+          });
+        });
+      } else {
+        // Offline — save to pending queue
+        addPendingSync({
+          playerName: playerName.trim(),
+          score, level, coins: newBalance,
+          purchasedSkins, activeSkin: activeSkinId,
+          timestamp: new Date().toISOString(),
+        });
+        updateLocalLeaderboard(playerName.trim(), score, level);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameOver]);
@@ -641,6 +748,12 @@ export function App() {
       <button onClick={applyUpdate} className="rounded-lg bg-black px-3 py-1 text-xs font-bold text-[#39ff14] transition active:scale-95">
         Update Now
       </button>
+    </div>
+  ) : null;
+
+  const offlineBadge = !isOnline ? (
+    <div className="fixed bottom-16 left-1/2 z-50 -translate-x-1/2 rounded-full bg-yellow-500/90 px-4 py-1.5 text-xs font-bold text-black shadow-lg sm:bottom-20 sm:text-sm lg:bottom-4">
+      Offline — scores will sync when connected
     </div>
   ) : null;
 
@@ -936,6 +1049,7 @@ export function App() {
     return (
       <main className="relative flex min-h-[100dvh] flex-col items-center justify-center overflow-hidden bg-[#0d1117] px-4 py-6">
         {updateBanner}
+        {offlineBadge}
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(57,255,20,0.03)_1px,transparent_1px),linear-gradient(to_bottom,rgba(57,255,20,0.03)_1px,transparent_1px)] bg-[size:40px_40px]" />
 
         <div className="relative flex w-full max-w-sm flex-col items-center gap-5 rounded-3xl border border-[#39ff14]/10 bg-[#111a11]/90 p-6 shadow-[0_0_60px_rgba(57,255,20,0.05)] backdrop-blur sm:gap-6 sm:p-8">
@@ -1050,6 +1164,7 @@ export function App() {
     return (
       <main className="relative flex min-h-[100dvh] flex-col items-center overflow-y-auto bg-[#0d1117] px-4 py-6">
         {updateBanner}
+        {offlineBadge}
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(57,255,20,0.03)_1px,transparent_1px),linear-gradient(to_bottom,rgba(57,255,20,0.03)_1px,transparent_1px)] bg-[size:40px_40px]" />
 
         <div className="relative w-full max-w-sm">
@@ -1070,6 +1185,7 @@ export function App() {
   return (
     <main className="relative flex h-[100vh] flex-col bg-[#0d1117] text-white">
       {updateBanner}
+        {offlineBadge}
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(57,255,20,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(57,255,20,0.02)_1px,transparent_1px)] bg-[size:40px_40px]" />
 
       {/* Top bar */}
