@@ -129,7 +129,10 @@ export function App() {
   const pendingDirectionRef = useRef<Direction>("right");
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
-  const speed = speedForLevel(level);
+  const [boosting, setBoosting] = useState(false);
+  const boostingRef = useRef(false);
+  const baseSpeed = speedForLevel(level);
+  const speed = boosting ? Math.max(40, Math.round(baseSpeed * 0.45)) : baseSpeed;
 
   useEffect(() => {
     const storedBest = window.localStorage.getItem("snake-best-score");
@@ -254,6 +257,8 @@ export function App() {
     setLevel(0);
     setGameOver(false);
     setIsRunning(false);
+    setBoosting(false);
+    boostingRef.current = false;
   };
 
   const queueDirection = useCallback((next: Direction) => {
@@ -265,21 +270,42 @@ export function App() {
 
   useEffect(() => {
     if (screen !== "playing") return;
+    const keyMap: Record<string, Direction> = { ArrowUp: "up", w: "up", W: "up", ArrowDown: "down", s: "down", S: "down", ArrowLeft: "left", a: "left", A: "left", ArrowRight: "right", d: "right", D: "right" };
+
     const onKeyDown = (event: KeyboardEvent) => {
-      const keyMap: Record<string, Direction> = { ArrowUp: "up", w: "up", W: "up", ArrowDown: "down", s: "down", S: "down", ArrowLeft: "left", a: "left", A: "left", ArrowRight: "right", d: "right", D: "right" };
       if (event.code === "Space") { event.preventDefault(); if (gameOver) resetGame(); else setIsRunning((r) => !r); return; }
       const next = keyMap[event.key];
-      if (next) { event.preventDefault(); queueDirection(next); if (!gameOver) setIsRunning(true); }
+      if (!next) return;
+      event.preventDefault();
+      if (!gameOver) setIsRunning(true);
+      // If holding the same direction as current, activate boost
+      if (event.repeat && next === pendingDirectionRef.current) {
+        if (!boostingRef.current) { boostingRef.current = true; setBoosting(true); }
+        return;
+      }
+      queueDirection(next);
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      const dir = keyMap[event.key];
+      if (dir && boostingRef.current) {
+        boostingRef.current = false;
+        setBoosting(false);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
   }, [gameOver, queueDirection, screen]);
 
+  // Swipe anywhere on screen to control snake
   useEffect(() => {
-    const board = boardRef.current;
-    if (!board) return;
-    const onTouchStart = (e: TouchEvent) => { touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; };
-    const onTouchMove = (e: TouchEvent) => { e.preventDefault(); };
+    if (screen !== "playing") return;
+    const onTouchStart = (e: TouchEvent) => {
+      // Skip if touching an interactive element (buttons, inputs)
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "BUTTON" || tag === "INPUT" || tag === "LABEL") return;
+      touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    };
     const onTouchEnd = (e: TouchEvent) => {
       if (!touchStartRef.current) return;
       const touch = e.changedTouches[0];
@@ -291,11 +317,10 @@ export function App() {
       queueDirection(next);
       if (!gameOver) setIsRunning(true);
     };
-    board.addEventListener("touchstart", onTouchStart, { passive: true });
-    board.addEventListener("touchmove", onTouchMove, { passive: false });
-    board.addEventListener("touchend", onTouchEnd, { passive: true });
-    return () => { board.removeEventListener("touchstart", onTouchStart); board.removeEventListener("touchmove", onTouchMove); board.removeEventListener("touchend", onTouchEnd); };
-  }, [gameOver, queueDirection]);
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchend", onTouchEnd, { passive: true });
+    return () => { document.removeEventListener("touchstart", onTouchStart); document.removeEventListener("touchend", onTouchEnd); };
+  }, [gameOver, queueDirection, screen]);
 
   useEffect(() => {
     const preventScroll = (e: TouchEvent) => { if (e.touches.length === 1) e.preventDefault(); };
@@ -333,11 +358,6 @@ export function App() {
     snake.forEach((s, i) => m.set(toKey(s), i));
     return m;
   }, [snake]);
-
-  const handleDirButton = (dir: Direction) => {
-    queueDirection(dir);
-    if (!gameOver) setIsRunning(true);
-  };
 
   const startGame = () => {
     if (!playerName.trim()) return;
@@ -465,7 +485,7 @@ export function App() {
   const gameBoard = (
     <div
       ref={boardRef}
-      className="relative w-full overflow-hidden rounded-2xl border border-[#39ff14]/15 bg-[#080c08]"
+      className={["relative w-full overflow-hidden rounded-2xl bg-[#080c08]", solidWalls ? "border-2 border-[#39ff14]/50 shadow-[inset_0_0_15px_rgba(57,255,20,0.1)]" : "border border-[#39ff14]/10"].join(" ")}
       style={{ touchAction: "none", aspectRatio: "1" }}
     >
       {isRunning && !gameOver && (
@@ -480,7 +500,7 @@ export function App() {
         style={{ gridTemplateColumns: `repeat(${GRID_SIZE}, 1fr)`, gridTemplateRows: `repeat(${GRID_SIZE}, 1fr)` }}
       >
         {Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, index) => {
-          const x = index % GRID_SIZE;
+          const x = index % GRID_SIZE + 1;
           const y = Math.floor(index / GRID_SIZE);
           const key = `${x}:${y}`;
           const isSnake = snakeMap.has(key);
@@ -567,22 +587,6 @@ export function App() {
     </div>
   );
 
-  // ─── D-pad button ───
-  const dpadBtn = (dir: Direction, icon: React.ReactNode) => (
-    <button
-      onClick={() => handleDirButton(dir)}
-      className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#1a2a1a] text-gray-300 transition active:scale-90 active:bg-[#39ff14]/20 active:text-[#39ff14] sm:h-14 sm:w-14"
-    >
-      {icon}
-    </button>
-  );
-
-  const chevron = (points: string) => (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5 sm:h-6 sm:w-6">
-      <polyline points={points} />
-    </svg>
-  );
-
   // ─── NAME ENTRY SCREEN ───
   if (screen === "name") {
     return (
@@ -604,7 +608,7 @@ export function App() {
 
           <div className="text-center">
             <h1 className="text-2xl font-black uppercase italic tracking-wider text-[#39ff14] drop-shadow-[0_0_10px_rgba(57,255,20,0.4)] sm:text-3xl">
-              Neon Slither
+              Snake Game 360
             </h1>
             <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-gray-500 sm:text-xs">Arcade Snake</p>
           </div>
@@ -652,7 +656,7 @@ export function App() {
 
   // ─── GAME SCREEN ───
   return (
-    <main className="relative flex h-[100dvh] flex-col bg-[#0d1117] text-white">
+    <main className="relative flex h-[100vh] flex-col bg-[#0d1117] text-white">
       {updateBanner}
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(57,255,20,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(57,255,20,0.02)_1px,transparent_1px)] bg-[size:40px_40px]" />
 
@@ -665,19 +669,105 @@ export function App() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 sm:h-5 sm:w-5"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         </button>
         <h1 className="text-sm font-black uppercase italic tracking-wider text-[#39ff14] drop-shadow-[0_0_8px_rgba(57,255,20,0.4)] sm:text-lg">
-          Neon Slither
+          Snake Game 360
         </h1>
         <button
           onClick={() => setSolidWalls((w) => !w)}
           className={["flex h-8 w-8 items-center justify-center rounded-lg transition sm:h-9 sm:w-9", solidWalls ? "text-[#39ff14]" : "text-gray-500"].join(" ")}
           title={solidWalls ? "Solid walls ON" : "Wrap-around"}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 sm:h-5 sm:w-5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          {solidWalls?'Wall':'Wall'}
+
+          {/* <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 sm:h-5 sm:w-5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> */}
         </button>
       </header>
 
-      {/* Scrollable content */}
-      <div className="relative z-10 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-20 sm:gap-3 sm:px-4 sm:pb-24">
+      {/* ── Desktop layout (lg+): game board full + sidebar ── */}
+      <div className="relative z-10 hidden min-h-0 flex-1 gap-4 px-4 pb-4 lg:flex">
+        {/* Game board — fills all available height */}
+        <div className="flex flex-1 items-center justify-center">
+          <div className="h-full max-h-full" style={{ aspectRatio: "1" }}>
+            {gameBoard}
+          </div>
+        </div>
+
+        {/* Desktop sidebar */}
+        <aside className="flex w-72 flex-shrink-0 flex-col gap-3 overflow-y-auto xl:w-80">
+          {/* Player */}
+          <div className="flex items-center justify-between rounded-xl bg-[#1a1f1a] px-4 py-2">
+            <span className="text-sm font-bold text-white">{playerName}</span>
+            {boosting && <span className="animate-pulse rounded-full bg-orange-500/20 px-2 py-0.5 text-[9px] font-bold text-orange-400">BOOST</span>}
+          </div>
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl bg-[#1a1f1a] px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Score</p>
+              <p className="text-2xl font-black text-[#39ff14] drop-shadow-[0_0_6px_rgba(57,255,20,0.3)]">{score.toLocaleString()}</p>
+            </div>
+            <div className="rounded-xl bg-[#1a1f1a] px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Level</p>
+              <div className="flex items-end justify-between">
+                <p className="text-2xl font-black text-cyan-400">{String(level).padStart(2, "0")}</p>
+                <span className="text-[9px] font-bold uppercase text-cyan-400/60">{levelTitle(level)}</span>
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex items-center gap-3 rounded-xl bg-[#1a1f1a] px-4 py-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500/10">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 text-orange-400"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </div>
+              <div>
+                <p className="text-[9px] font-bold uppercase tracking-wider text-gray-500">Speed</p>
+                <p className="text-base font-black text-orange-400">{Math.round((1000 / speed) * 10) / 10}x</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-xl bg-[#1a1f1a] px-4 py-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#39ff14]/10">
+                <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4 text-[#39ff14]"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+              </div>
+              <div>
+                <p className="text-[9px] font-bold uppercase tracking-wider text-gray-500">Best</p>
+                <p className="text-base font-black text-[#39ff14]">{bestScore.toLocaleString()}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Level progress */}
+          <div className="flex items-center gap-2 px-0.5">
+            <span className="text-[10px] font-bold text-gray-500">LVL {level}</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#1a1f1a]">
+              <div className="h-full rounded-full bg-gradient-to-r from-[#39ff14] to-[#70e000] transition-all duration-300" style={{ width: level >= MAX_LEVEL ? "100%" : `${(applesInLevel / APPLES_PER_LEVEL) * 100}%` }} />
+            </div>
+            <span className="text-[10px] font-bold text-gray-500">{level >= MAX_LEVEL ? "MAX" : `LVL ${level + 1}`}</span>
+          </div>
+
+          {/* Controls */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { if (gameOver) resetGame(); else setIsRunning((r) => !r); }}
+              className="flex-1 rounded-xl bg-[#39ff14] py-2.5 text-sm font-bold text-black transition active:scale-95"
+            >
+              {gameOver ? "Reset" : isRunning ? "Pause" : "Start"}
+            </button>
+            <button
+              onClick={resetGame}
+              className="rounded-xl border border-[#39ff14]/20 bg-[#1a1f1a] px-4 py-2.5 text-sm font-bold text-gray-300 transition hover:text-white active:scale-95"
+            >
+              New
+            </button>
+          </div>
+
+          <p className="text-center text-[10px] text-gray-600">Arrow keys / WASD to move, hold to boost, Space to pause</p>
+
+          {/* Leaderboard */}
+          {leaderboardPanel}
+        </aside>
+      </div>
+
+      {/* ── Mobile/tablet layout (below lg) ── */}
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-20 sm:gap-3 sm:px-4 sm:pb-24 lg:hidden">
         {mobileTab === "play" ? (
           <>
             {/* Stat cards row 1 */}
@@ -736,17 +826,25 @@ export function App() {
               </span>
             </div>
 
-            {/* Game board - constrained to available space */}
-            <div className="mx-auto w-full max-w-[min(100%,500px)]">
-              {gameBoard}
+            {/* Boost indicator */}
+            {boosting && (
+              <div className="flex items-center justify-center">
+                <span className="animate-pulse rounded-full bg-orange-500/20 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-orange-400">Boost Active</span>
+              </div>
+            )}
+
+            {/* Game board — fill available space */}
+            <div className="flex min-h-0 flex-1 items-center justify-center">
+              <div className="h-full max-h-full w-full" style={{ aspectRatio: "1", maxWidth: "100%" }}>
+                {gameBoard}
+              </div>
             </div>
 
-            {/* D-pad + pause */}
-            <div className="relative mx-auto flex flex-col items-center gap-1.5 py-1 sm:gap-2 sm:py-2">
-              {/* Floating pause */}
+            {/* Floating pause/play button */}
+            <div className="flex justify-end px-2 py-1">
               <button
                 onClick={() => { if (gameOver) resetGame(); else setIsRunning((r) => !r); }}
-                className="absolute -top-1 right-[-3rem] flex h-11 w-11 items-center justify-center rounded-full bg-[#39ff14] shadow-[0_0_20px_rgba(57,255,20,0.3)] transition active:scale-90 sm:right-[-4rem] sm:h-14 sm:w-14"
+                className="flex h-12 w-12 items-center justify-center rounded-full bg-[#39ff14] shadow-[0_0_20px_rgba(57,255,20,0.3)] transition active:scale-90 sm:h-14 sm:w-14"
               >
                 {gameOver ? (
                   <svg viewBox="0 0 24 24" fill="black" className="h-5 w-5 sm:h-6 sm:w-6"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
@@ -756,13 +854,6 @@ export function App() {
                   <svg viewBox="0 0 24 24" fill="black" className="h-5 w-5 sm:h-6 sm:w-6"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 )}
               </button>
-
-              {dpadBtn("up", chevron("18 15 12 9 6 15"))}
-              <div className="flex gap-6 sm:gap-8">
-                {dpadBtn("left", chevron("15 18 9 12 15 6"))}
-                {dpadBtn("down", chevron("6 9 12 15 18 9"))}
-                {dpadBtn("right", chevron("9 18 15 12 9 6"))}
-              </div>
             </div>
           </>
         ) : (
@@ -770,8 +861,8 @@ export function App() {
         )}
       </div>
 
-      {/* Bottom nav */}
-      <nav className="fixed bottom-0 left-0 right-0 z-20 flex items-end justify-around border-t border-[#1a1f1a] bg-[#0d1117]/95 px-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur sm:pt-2">
+      {/* Bottom nav — mobile/tablet only */}
+      <nav className="fixed bottom-0 left-0 right-0 z-20 flex items-end justify-around border-t border-[#1a1f1a] bg-[#0d1117]/95 px-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur sm:pt-2 lg:hidden">
         <button
           onClick={() => setMobileTab("play")}
           className={["flex flex-col items-center gap-0.5 transition", mobileTab === "play" ? "text-[#39ff14]" : "text-gray-500"].join(" ")}
